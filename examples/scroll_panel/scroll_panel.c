@@ -29,6 +29,17 @@
 
 static void DrawStyleEditControls(void);  // Draw and process scroll bar style edition controls
 
+
+static int captureId = 0;
+static void ResetCaptureId()
+{
+    captureId = 0;
+}
+static int NewCaptureId()
+{
+    return ++captureId;
+}
+
 //------------------------------------------------------------------------------------
 // Program main entry point
 //------------------------------------------------------------------------------------
@@ -63,11 +74,15 @@ int main()
         //----------------------------------------------------------------------------------
         BeginDrawing();
 
+            ResetCaptureId();
+
             ClearBackground(RAYWHITE);
 
             DrawText(TextFormat("[%f, %f]", panelScroll.x, panelScroll.y), 4, 4, 20, RED);
 
+			GuiSetCapturedId(NewCaptureId());
             GuiScrollPanel(panelRec, NULL, panelContentRec, &panelScroll, &panelView);
+			GuiSetCapturedId(0);
 
             int buttonSize = 64;
             int rCnt = panelContentRec.height / buttonSize;
@@ -76,14 +91,20 @@ int main()
             GuiSetScissor(panelView);
                 GuiGrid((Rectangle){panelRec.x + panelScroll.x, panelRec.y + panelScroll.y, panelContentRec.width, panelContentRec.height}, NULL, 16, 3, NULL);
                 for (int r=0; r < rCnt; ++r)
-                    for (int c=0; c < cCnt; ++c)
+                    for (int c = 0; c < cCnt; ++c)
+                    {
+                        GuiSetCapturedId(NewCaptureId());
                         GuiButton((Rectangle) { panelRec.x + panelScroll.x + c * buttonSize, panelRec.y + panelScroll.y + r * buttonSize, buttonSize, buttonSize }, "");
+                        GuiSetCapturedId(0);
+                    }
 			GuiSetScissor((Rectangle) { 0 });
             EndScissorMode();
 
             if (showContentArea) DrawRectangle(panelRec.x + panelScroll.x, panelRec.y + panelScroll.y, panelContentRec.width, panelContentRec.height, Fade(RED, 0.1));
 
+            GuiSetCapturedId(NewCaptureId());
             DrawStyleEditControls();
+            GuiSetCapturedId(0);
 
             GuiCheckBox((Rectangle){ 565, 80, 20, 20 }, "SHOW CONTENT AREA", &showContentArea);
 
