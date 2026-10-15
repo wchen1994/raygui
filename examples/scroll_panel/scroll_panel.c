@@ -94,9 +94,19 @@ int main()
                     for (int c = 0; c < cCnt; ++c)
                     {
                         GuiSetCapturedId(NewCaptureId());
-                        GuiButton((Rectangle) { panelRec.x + panelScroll.x + c * buttonSize, panelRec.y + panelScroll.y + r * buttonSize, buttonSize, buttonSize }, "");
+                        if (GuiButton((Rectangle) { panelRec.x + panelScroll.x + c * buttonSize, panelRec.y + panelScroll.y + r * buttonSize, buttonSize, buttonSize }, ""))
+                        {
+                            TraceLog(LOG_INFO, "%d,%d", r, c);
+                        }
                         GuiSetCapturedId(0);
                     }
+
+				GuiSetCapturedId(NewCaptureId());
+                if (GuiButton((Rectangle) { panelRec.x + panelScroll.x + 0.5 * buttonSize, panelRec.y + panelScroll.y + 0.5 * buttonSize, buttonSize, buttonSize }, ""))
+                {
+					TraceLog(LOG_INFO, "floating button");
+                }
+				GuiSetCapturedId(0);
 			GuiSetScissor((Rectangle) { 0 });
             EndScissorMode();
 
