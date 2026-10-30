@@ -5,6 +5,7 @@ project(raygui C)
 
 # Config options
 option(BUILD_RAYGUI_EXAMPLES "Build the examples." OFF)
+option(BUILD_RAYGUI_TESTS "Build the tests." OFF)
 
 # Force building examples if building in the root as standalone.
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
@@ -73,4 +74,10 @@ if(${BUILD_RAYGUI_EXAMPLES})
 
     # Copy all of the resource files to the destination
     file(COPY ${example_resources} DESTINATION "resources/")
+endif()
+
+# Tests
+if(${BUILD_RAYGUI_TESTS})
+    enable_testing()
+    add_subdirectory(${RAYGUI_ROOT}/tests ${CMAKE_BINARY_DIR}/tests)
 endif()

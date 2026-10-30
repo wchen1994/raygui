@@ -84,6 +84,35 @@ ListView    |  ColorPicker |  MessageBox  |  TextInputBox
 ```
 
 
+## control capture
+
+When controls overlap (floating panels, popups, scrollable content), raygui can resolve which control owns an interaction: assign a stable id to the controls drawn next and the topmost control hit on mouse press keeps the interaction until release.
+
+```c
+enum { ID_SCROLL_PANEL = 1, ID_SAVE_BUTTON, ID_CANCEL_BUTTON };
+
+GuiPushId(ID_SCROLL_PANEL);
+GuiScrollPanel(panelRec, NULL, contentRec, &scroll, &view);
+GuiPopId();
+
+GuiPushId(ID_SAVE_BUTTON);
+if (GuiButton(saveRec, "Save")) save();
+GuiPopId();
+```
+
+Rules:
+
+- The first non-zero id enables capture mode; projects that do not use ids keep the legacy behavior.
+- On the press frame all hit controls register their id, the last one drawn (topmost) wins, and no control runs side effects yet.
+- While the button is held only the captured id can interact; a press on empty space locks the UI until release.
+- Click-like results (`RESULT_PRESSED`, `RESULT_CHANGED`) are returned on release. Drag controls start on the frame after press, while the button is still held; a quick click with no held frame applies the slider/color-bar value on release.
+- Ids must be unique and stable for the whole press-to-release period. For dynamic lists derive the id from the item identity, not from a per-frame counter.
+- `GuiGetCapturedId()` returns the active id after the UI has been drawn.
+
+See [examples/scroll_panel](examples/scroll_panel) for a floating button over a grid of buttons.
+For the full design, behavior matrix, and future work, see [docs/control-capture.md](docs/control-capture.md).
+
+
 ## raygui styles
 
 `raygui` comes with a [default](styles/default) style automatically loaded at runtime:
