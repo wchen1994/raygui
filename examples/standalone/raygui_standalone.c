@@ -27,7 +27,12 @@ int main()
     
     // TODO: Create your game loop
     {
+        // Start a gui frame (automatic ids and capture state are rebuilt every frame)
+        GuiBeginFrame();
+
         // TODO: Use raygui API
+
+        GuiEndFrame();
     }
     
     // TODO: De-initialize all resources

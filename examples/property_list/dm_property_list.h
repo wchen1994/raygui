@@ -577,7 +577,7 @@ void GuiDMPropertyList(Rectangle bounds, GuiDMProperty* props, int count, int* f
                         
                         // draw property value
                         if(!PROP_CHECK_FLAG(&props[p], GUI_PFLAG_COLLAPSED))
-                            GuiTextBox((Rectangle){propBounds.x, propBounds.y + GuiGetStyle(LISTVIEW, LIST_ITEMS_HEIGHT)+1, propBounds.width, GuiGetStyle(LISTVIEW, LIST_ITEMS_HEIGHT)-2}, props[p].value.vtext.val, props[p].value.vtext.size, (propState == STATE_FOCUSED));
+                            GuiTextBox((Rectangle){propBounds.x, propBounds.y + GuiGetStyle(LISTVIEW, LIST_ITEMS_HEIGHT)+1, propBounds.width, GuiGetStyle(LISTVIEW, LIST_ITEMS_HEIGHT)-2}, props[p].value.vtext.val, props[p].value.vtext.size);
                     } break;
                     
                     case GUI_PROP_SELECT: {

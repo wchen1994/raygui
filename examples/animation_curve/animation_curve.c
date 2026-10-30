@@ -67,9 +67,7 @@ int main()
     bool sectionActive[5] = { 0 };
     sectionActive[0] = true;
     const char *sectionNames[5] = { "X Position", "Y Position", "Width", "Height", "Rotation" };
-    bool editValueBox[5][4] = { 0 };
-    char *valTextBox[5][4][20] = { 0 };
-    bool playAnimation = true;
+    char *valTextBox[5][4][20] = { 0 };    bool playAnimation = true;
     bool showHelp = true;
 
     Rectangle settingsRect = (Rectangle){ screenWidth - screenWidth/3, 0, screenWidth/3, screenHeight };
@@ -147,6 +145,8 @@ int main()
         // Draw
         //----------------------------------------------------------------------------------
         BeginDrawing();
+
+            GuiBeginFromRaylib();
             ClearBackground(GetColor( GuiGetStyle(DEFAULT, BACKGROUND_COLOR)));
 
             // Scene
@@ -256,45 +256,32 @@ int main()
                 GuiLabel((Rectangle){ contentRect.x, contentRect.y + contentRect.height + scrollOffset.y, contentRect.width, fontSize }, "Position");
                 contentRect.height += fontSize;
 
-                if (!editValueBox[i][0]) gcvt(p->position.x, 6, (char *)valTextBox[i][0]);  // Transform x position to string
+                if (!GuiIsEditing()) gcvt(p->position.x, 6, (char *)valTextBox[i][0]);  // Transform x position to string
 
-                if (!editValueBox[i][1]) gcvt(curves[i].start + (curves[i].end-curves[i].start)*p->position.y, 6, (char *)valTextBox[i][1]); // Transform y position to string
+                if (!GuiIsEditing()) gcvt(curves[i].start + (curves[i].end-curves[i].start)*p->position.y, 6, (char *)valTextBox[i][1]); // Transform y position to string
 
                 // X pos
-                if (GuiTextBox((Rectangle){ contentRect.x, contentRect.y + contentRect.height + scrollOffset.y, contentRect.width/2-margin, 1.5f*fontSize }, (char *)valTextBox[i][0], 20, editValueBox[i][0]))
+                if (GuiTextBox((Rectangle){ contentRect.x, contentRect.y + contentRect.height + scrollOffset.y, contentRect.width/2-margin, 1.5f*fontSize }, (char *)valTextBox[i][0], 20))
                 {
-                    editValueBox[i][0] = !editValueBox[i][0];
+                    // Input ended: try to convert text to float and assign it to the point
+                    char *endPtr = NULL;
+                    double value = strtod((char *)valTextBox[i][0], &endPtr);
 
-                    // Input ended
-                    if (!editValueBox[i][0])
-                    {
-                        // Try to convert text to float and assign it to the point
-                        char *endPtr = NULL;
-                        double value = strtod((char *)valTextBox[i][0], &endPtr);
-
-                        if (endPtr != (char *)valTextBox[i][0]) p->position.x = (value < 0)? 0 : (value > 1)? 1 : value;
-                    }
+                    if (endPtr != (char *)valTextBox[i][0]) p->position.x = (value < 0)? 0 : (value > 1)? 1 : value;
                 }
 
                 // Y pos
-                if (GuiTextBox((Rectangle){ contentRect.x + contentRect.width/2, contentRect.y + contentRect.height + scrollOffset.y, contentRect.width/2.0f, 1.5f*fontSize }, (char *)valTextBox[i][1], 20, editValueBox[i][1]))
+                if (GuiTextBox((Rectangle){ contentRect.x + contentRect.width/2, contentRect.y + contentRect.height + scrollOffset.y, contentRect.width/2.0f, 1.5f*fontSize }, (char *)valTextBox[i][1], 20))
                 {
-                    editValueBox[i][1] = !editValueBox[i][1];
+                    // Input ended: try to convert text to float and assign it to the point
+                    char *endPtr = NULL;
+                    double value = strtod((char *)valTextBox[i][1], &endPtr);
 
-                    // Input ended
-                    if (!editValueBox[i][1])
+                    if (endPtr != (char *)valTextBox[i][1])
                     {
-                        // Try to convert text to float and assign it to the point
-                        char *endPtr = NULL;
-                        double value = strtod((char *)valTextBox[i][1], &endPtr);
-
-                        if (endPtr != (char *)valTextBox[i][1])
-                        {
-                            float normalizedVal = (value - curves[i].start)/(curves[i].end - curves[i].start);
-                            p->position.y = (normalizedVal < 0)? 0 : (normalizedVal > 1)? 1 : normalizedVal;
-                        }
+                        float normalizedVal = (value - curves[i].start)/(curves[i].end - curves[i].start);
+                        p->position.y = (normalizedVal < 0)? 0 : (normalizedVal > 1)? 1 : normalizedVal;
                     }
-
                 }
 
                 contentRect.height += 1.5f*fontSize + margin;
@@ -303,38 +290,26 @@ int main()
                 GuiLabel((Rectangle){ contentRect.x, contentRect.y + contentRect.height + scrollOffset.y, contentRect.width, fontSize }, "Tangents");
                 contentRect.height += fontSize;
 
-                if (!editValueBox[i][2]) gcvt(p->tangents.x, 6, (char *)valTextBox[i][2]); // Transform left tangent to string
+                if (!GuiIsEditing()) gcvt(p->tangents.x, 6, (char *)valTextBox[i][2]); // Transform left tangent to string
 
-                if (!editValueBox[i][3]) gcvt(p->tangents.y, 6, (char *)valTextBox[i][3]);   // Transform right tangent to string
+                if (!GuiIsEditing()) gcvt(p->tangents.y, 6, (char *)valTextBox[i][3]);   // Transform right tangent to string
 
                 // Left tan
-                if (GuiTextBox((Rectangle){ contentRect.x, contentRect.y + contentRect.height + scrollOffset.y, contentRect.width/2 - margin, 1.5f*fontSize }, (char *)valTextBox[i][2], 20, editValueBox[i][2]))
+                if (GuiTextBox((Rectangle){ contentRect.x, contentRect.y + contentRect.height + scrollOffset.y, contentRect.width/2 - margin, 1.5f*fontSize }, (char *)valTextBox[i][2], 20))
                 {
-                    editValueBox[i][2] = !editValueBox[i][2];
-
-                    // Input ended
-                    if (!editValueBox[i][2])
-                    {
-                        // Try to convert text to float and assign it to the point
-                        char *endPtr = NULL;
-                        double value = strtod((char *)valTextBox[i][2], &endPtr);
-                        if (endPtr != (char *)valTextBox[i][2]) p->tangents.x = value;
-                    }
+                    // Input ended: try to convert text to float and assign it to the point
+                    char *endPtr = NULL;
+                    double value = strtod((char *)valTextBox[i][2], &endPtr);
+                    if (endPtr != (char *)valTextBox[i][2]) p->tangents.x = value;
                 }
 
                 // Right tan
-                if (GuiTextBox((Rectangle){ contentRect.x + contentRect.width/2.0f, contentRect.y + contentRect.height + scrollOffset.y, contentRect.width/2.0f, 1.5f*fontSize }, (char *)valTextBox[i][3], 20, editValueBox[i][3]))
+                if (GuiTextBox((Rectangle){ contentRect.x + contentRect.width/2.0f, contentRect.y + contentRect.height + scrollOffset.y, contentRect.width/2.0f, 1.5f*fontSize }, (char *)valTextBox[i][3], 20))
                 {
-                    editValueBox[i][3] = !editValueBox[i][3];
-
-                    // Input ended
-                    if (!editValueBox[i][3])
-                    {
-                        // Try to convert text to float and assign it to the point
-                        char *endPtr = NULL;
-                        double value = strtod((char *)valTextBox[i][3], &endPtr);
-                        if (endPtr != (char *)valTextBox[i][3]) p->tangents.y = value;
-                    }
+                    // Input ended: try to convert text to float and assign it to the point
+                    char *endPtr = NULL;
+                    double value = strtod((char *)valTextBox[i][3], &endPtr);
+                    if (endPtr != (char *)valTextBox[i][3]) p->tangents.y = value;
                 }
 
                 contentRect.height += 1.5*fontSize + margin;
@@ -370,6 +345,8 @@ int main()
 
             // Time panel shadow
             DrawRectangleGradientV(timeLineRect.x, timeLineRect.y - 12, timeLineRect.width, 12, BLANK, (Color){ 0, 0, 0, 100 });
+
+            GuiEndFromRaylib();
 
         EndDrawing();
         //----------------------------------------------------------------------------------

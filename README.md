@@ -12,7 +12,7 @@
 
 **WARNING: Latest `raygui` from master branch is always aligned with latest `raylib` from master branch and all raylibtech tools. Make sure to use the latest versions.**
 
-**WARNING: Latest `raygui 5.0` introduces some API-BREAKING changes, now all functions return a result value.**
+**WARNING: Latest `raygui 5.1` introduces API-BREAKING changes: automatic control capture (manual capture ids removed) and internal text editing (the `editMode` parameter was removed from text controls). A UI frame must be wrapped in `GuiBeginFromRaylib()`/`GuiEndFromRaylib()`.**
 
 *NOTE: raygui is a single-file header-only library (despite its internal dependency on raylib), so, functions definition AND implementation reside in the same file `raygui.h`, when including `raygui.h` in a module, `RAYGUI_IMPLEMENTATION` must be previously defined to include the implementation part of `raygui.h` BUT only in one compilation unit, other modules could also include `raygui.h` but `RAYGUI_IMPLEMENTATION` must not be defined again.*
 
@@ -86,31 +86,37 @@ ListView    |  ColorPicker |  MessageBox  |  TextInputBox
 
 ## control capture
 
-When controls overlap (floating panels, popups, scrollable content), raygui can resolve which control owns an interaction: assign a stable id to the controls drawn next and the topmost control hit on mouse press keeps the interaction until release.
+Controls are assigned an id automatically in draw order. Every control under the pointer registers in a per-frame hit stack, so overlapping controls (floating panels, popups, scrollable content) resolve a single owner instead of interacting at the same time.
+
+A frame must be started and closed explicitly:
 
 ```c
-enum { ID_SCROLL_PANEL = 1, ID_SAVE_BUTTON, ID_CANCEL_BUTTON };
+GuiBeginFromRaylib();
 
-GuiPushId(ID_SCROLL_PANEL);
+if (GuiButton(saveRec, "Save")) save();   // result is returned on release
 GuiScrollPanel(panelRec, NULL, contentRec, &scroll, &view);
-GuiPopId();
 
-GuiPushId(ID_SAVE_BUTTON);
-if (GuiButton(saveRec, "Save")) save();
-GuiPopId();
+GuiEndFromRaylib();
 ```
 
 Rules:
 
-- The first non-zero id enables capture mode; projects that do not use ids keep the legacy behavior.
-- On the press frame all hit controls register their id, the last one drawn (topmost) wins, and no control runs side effects yet.
-- While the button is held only the captured id can interact; a press on empty space locks the UI until release.
-- Click-like results (`RESULT_PRESSED`, `RESULT_CHANGED`) are returned on release. Drag controls start on the frame after press, while the button is still held; a quick click with no held frame applies the slider/color-bar value on release.
-- Ids must be unique and stable for the whole press-to-release period. For dynamic lists derive the id from the item identity, not from a per-frame counter.
-- `GuiGetCapturedId()` returns the active id after the UI has been drawn.
+- The press frame is capture-only: no control runs interaction side effects. The topmost hit control becomes the tentative owner.
+- Click-like results are returned on release. Dragging starts after the 5 px drag threshold; direction arbitration then transfers the capture to the first hit control supporting that direction (for example a Slider under a floating Button). If no control supports the direction, the topmost press owner keeps the capture, so a Button still triggers after a small drag.
+- The capture owner keeps the interaction while the pointer leaves its bounds, but the release position matters: a discrete control (Button, Toggle, CheckBox, ComboBox, ...) released outside its bounds is cancelled, while a continuous drag (Slider, ScrollBar, ColorPanel) may finish outside and keeps updating.
+- Without capture only the topmost hit control is highlighted; with capture only the capture holder is. Hover ownership does not drift with the pointer.
+- Editing TextBox and expanded DropdownBox are modal: clicking outside only ends their interaction and never activates controls underneath.
+- Only one discrete control returns a result per frame.
+- `GuiGetCapturedId()` returns the active control id (`0` when idle). Ids are internal and are not exposed to the application.
+- Control ids are assigned automatically in draw order. Draw dynamic lists whose item count can change **after** all fixed controls: otherwise the ids of the controls drawn after the list shift and an in-progress Slider/ScrollPanel drag can lose its capture.
+- TextBox, ValueBox, ValueBoxFloat, Spinner and DropdownBox manage their edit/open state internally. Only one text control can be edited at a time: clicking another one commits the previous editor and switches focus, and keyboard input only reaches the active control. Use `GuiIsEditing()` to check whether any text control is being edited.
+- ValueBox and ValueBoxFloat are built on the internal GuiTextBox: the text buffer is kept while editing and the numeric value is parsed only on commit (ENTER, ESCAPE or click outside). Invalid text keeps the previous value; integer values are clamped on commit. This also gives them normal TextBox editing (cursor, selection, clipboard).
+- `GuiSpinner()` is a layout helper built from two Buttons and a ValueBox; the three children own their capture ids independently. While the value box is editing, an arrow click first commits the editor (modal), and the next click steps the value.
 
-See [examples/scroll_panel](examples/scroll_panel) for a floating button over a grid of buttons.
-For the full design, behavior matrix, and future work, see [docs/control-capture.md](docs/control-capture.md).
+Migrating from raygui 5.0: remove `GuiSetCapturedId()`, `GuiPushId()` and `GuiPopId()` calls, wrap the UI in `GuiBeginFromRaylib()`/`GuiEndFromRaylib()` (or `GuiBeginFrame()`/`GuiEndFrame()` for a custom backend), and remove the `editMode` argument from TextBox/ValueBox/ValueBoxFloat/Spinner/DropdownBox calls.
+
+See [examples/scroll_panel](examples/scroll_panel) for overlapping controls and [examples/controls_test_suite](examples/controls_test_suite) for every control.
+For the implementation notes and behaviour matrix, see [docs/control-capture.md](docs/control-capture.md).
 
 
 ## raygui styles

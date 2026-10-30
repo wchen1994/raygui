@@ -45,6 +45,8 @@ int main()
 		//----------------------------------------------------------------------------------
 		BeginDrawing();
 
+            GuiBeginFromRaylib();
+
 		ClearBackground(RAYWHITE);
 
 		if (GuiFloatBox((Rectangle){ 10, 10, 100, 20 }, NULL, &variableA, -1000000.0, 1000000.0, variableAMode)) variableAMode = !variableAMode;
@@ -75,6 +77,8 @@ int main()
 		
 		GuiFloatBox((Rectangle){ 55, 40, 135, 20 }, "= ", &result, -2000000.0, 2000000.0, false);
 		
+            GuiEndFromRaylib();
+
 		EndDrawing();
         //----------------------------------------------------------------------------------
 	}
@@ -106,7 +110,7 @@ int GuiFloatBox(Rectangle bounds, const char* text, float* value, int minValue, 
 
     // Update control
     //--------------------------------------------------------------------
-    if ((state != STATE_DISABLED) && !guiLocked && !guiControlExclusiveMode)
+    if ((state != STATE_DISABLED) && !guiLocked)
     {
         Vector2 mousePoint = GetMousePosition();
 

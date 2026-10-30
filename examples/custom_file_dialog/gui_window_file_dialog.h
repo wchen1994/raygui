@@ -53,14 +53,11 @@ typedef struct {
     bool supportDrag;
 
     // UI variables
-    bool dirPathEditMode;
     char dirPathText[1024];
 
     int filesListScrollIndex;
-    bool filesListEditMode;
     int filesListActive;
 
-    bool fileNameEditMode;
     char fileNameText[1024];
     bool SelectFilePressed;
     bool CancelFilePressed;
@@ -180,12 +177,9 @@ GuiWindowFileDialogState InitGuiWindowFileDialog(const char *initPath)
     state.panOffset = (Vector2){ 0, 0 };
 
     // Init path data
-    state.dirPathEditMode = false;
     state.filesListActive = -1;
     state.prevFilesListActive = state.filesListActive;
     state.filesListScrollIndex = 0;
-
-    state.fileNameEditMode = false;
 
     state.SelectFilePressed = false;
     state.CancelFilePressed = false;
@@ -289,22 +283,17 @@ void GuiWindowFileDialog(GuiWindowFileDialogState *state)
         }
 
         // Draw current directory text box info + path editing logic
-        if (GuiTextBox((Rectangle){ state->windowBounds.x + 8, state->windowBounds.y + 24 + 12, state->windowBounds.width - 48 - 16, 24 }, state->dirPathText, 1024, state->dirPathEditMode))
+        if (GuiTextBox((Rectangle){ state->windowBounds.x + 8, state->windowBounds.y + 24 + 12, state->windowBounds.width - 48 - 16, 24 }, state->dirPathText, 1024))
         {
-            if (state->dirPathEditMode)
+            // Text box committed: verify if a valid path has been introduced
+            if (DirectoryExists(state->dirPathText))
             {
-                // Verify if a valid path has been introduced
-                if (DirectoryExists(state->dirPathText))
-                {
-                    // Reload directory files (frees previous list)
-                    ReloadDirectoryFiles(state);
+                // Reload directory files (frees previous list)
+                ReloadDirectoryFiles(state);
 
-                    strcpy(state->dirPathTextCopy, state->dirPathText);
-                }
-                else strcpy(state->dirPathText, state->dirPathTextCopy);
+                strcpy(state->dirPathTextCopy, state->dirPathText);
             }
-
-            state->dirPathEditMode = !state->dirPathEditMode;
+            else strcpy(state->dirPathText, state->dirPathTextCopy);
         }
 
         // List view elements are aligned left
@@ -350,8 +339,9 @@ void GuiWindowFileDialog(GuiWindowFileDialogState *state)
         // Draw bottom controls
         //--------------------------------------------------------------------------------------
         GuiLabel((Rectangle){ state->windowBounds.x + 8, state->windowBounds.y + state->windowBounds.height - 68, 60, 24 }, "File name:");
-        if (GuiTextBox((Rectangle){ state->windowBounds.x + 72, state->windowBounds.y + state->windowBounds.height - 68, state->windowBounds.width - 184, 24 }, state->fileNameText, 128, state->fileNameEditMode))
+        if (GuiTextBox((Rectangle){ state->windowBounds.x + 72, state->windowBounds.y + state->windowBounds.height - 68, state->windowBounds.width - 184, 24 }, state->fileNameText, 128))
         {
+            // Text box committed: validate the introduced file name
             if (*state->fileNameText)
             {
                 // Verify if a valid filename has been introduced
@@ -373,8 +363,6 @@ void GuiWindowFileDialog(GuiWindowFileDialogState *state)
                     strcpy(state->fileNameText, state->fileNameTextCopy);
                 }
             }
-
-            state->fileNameEditMode = !state->fileNameEditMode;
         }
 
         GuiLabel((Rectangle){ state->windowBounds.x + 8, state->windowBounds.y + state->windowBounds.height - 24 - 12, 68, 24 }, "File filter:");
@@ -601,15 +589,15 @@ static int GuiListViewFiles(Rectangle bounds, FileInfo *files, int count, int *s
         float percentVisible = (float)(endIndex - startIndex)/count;
         float sliderSize = bounds.height*percentVisible;
 
-        int prevSliderSize = GuiGetStyle(SCROLLBAR, SLIDER_WIDTH);  // Save default slider size
+        int prevSliderSize = GuiGetStyle(SCROLLBAR, SCROLL_SLIDER_SIZE);  // Save default slider size
         int prevScrollSpeed = GuiGetStyle(SCROLLBAR, SCROLL_SPEED); // Save default scroll speed
-        GuiSetStyle(SCROLLBAR, SLIDER_WIDTH, sliderSize);           // Change slider size
+        GuiSetStyle(SCROLLBAR, SCROLL_SLIDER_SIZE, sliderSize);           // Change slider size
         GuiSetStyle(SCROLLBAR, SCROLL_SPEED, count - visibleItems); // Change scroll speed
 
         startIndex = GuiScrollBar(scrollBarBounds, startIndex, 0, count - visibleItems);
 
         GuiSetStyle(SCROLLBAR, SCROLL_SPEED, prevScrollSpeed); // Reset scroll speed to default
-        GuiSetStyle(SCROLLBAR, SLIDER_WIDTH, prevSliderSize);  // Reset slider size to default
+        GuiSetStyle(SCROLLBAR, SCROLL_SLIDER_SIZE, prevSliderSize);  // Reset slider size to default
     }
     //--------------------------------------------------------------------
 

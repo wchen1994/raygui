@@ -116,39 +116,35 @@
 *
 *       TOOL: rGuiLayout is a visual tool to create raygui layouts: github.com/raysan5/rguilayout
 *
-*   CONTROL CAPTURE (capture id):
-*       By default every control interacts independently. For overlapping controls it is
-*       usually desired that the control under the pointer owns the interaction until the
-*       mouse button is released, so a floating button does not "click through" to the
-*       control underneath it.
+*   CONTROL CAPTURE (automatic ids):
+*       Controls are assigned an id automatically in draw order. Every control under the
+*       pointer registers itself in a per-frame hit stack, so overlapping controls resolve
+*       ownership instead of interacting at the same time.
 *
-*       Assign an id to the controls drawn next and let raygui resolve the owner on press:
+*       A frame must be started and closed explicitly:
 *
-*           GuiPushId(ID_SCROLL_PANEL);
-*           GuiScrollPanel(...);
-*           GuiPopId();
+*           GuiBeginFromRaylib();                  // raylib input snapshot + frame start
+*           if (GuiButton(saveRec, "Save")) { ... } // result is returned on release
+*           GuiEndFromRaylib();
 *
-*           GuiPushId(ID_SAVE_BUTTON);
-*           if (GuiButton(saveRec, "Save")) { ... }   // result is returned on release
-*           GuiPopId();
+*       For a custom input backend use GuiBeginFrame() and GuiEndFrame() (standalone) or, in
+*       the next iteration, inject GuiInput through GuiBegin()/GuiEnd().
 *
 *       Rules:
-*           - Capture is enabled the first time a non-zero id is assigned, so existing
-*             projects that do not use ids keep the legacy behavior.
-*           - On the press frame every hit control registers its id; the last one drawn
-*             (topmost) wins. No control runs interaction side effects on that frame.
-*           - While the button is held only the captured id can interact. A press on empty
-*             space locks the UI until release. A press on a control without id falls back
-*             to the legacy behavior.
-*           - Click-like results are returned on the release frame. Drag controls start
-*             on the first frame after press (still held), so they keep working; a quick
-*             click with no held frame applies the slider/color-bar value on release.
-*           - Ids must be unique and stable for the whole press-to-release period. Do not
-*             derive them from a per-frame counter unless the draw order is guaranteed
-*             stable; for dynamic lists derive them from the item identity.
-*           - Composite controls (ScrollPanel, ColorPicker, MessageBox, ...) capture as a
-*             single id; call their sub-controls directly if independent capture is needed.
-*           - GuiGetCapturedId() returns the active id after the UI has been drawn.
+*           - The press frame is capture-only: no control runs interaction side effects.
+*             The topmost control hit becomes the tentative owner.
+*           - Click-like results are returned on the release frame. Dragging starts only
+*             after the drag threshold (default 5 px); the direction arbitration then
+*             transfers the capture to the first hit control that supports that direction.
+*           - A control that owns the capture keeps it even when the pointer leaves its
+*             bounds; release still triggers it. GuiGetCapturedId() reports the active id.
+*           - Hover is resolved from the previous frame hit stack: without capture only the
+*             topmost hit control is highlighted, with capture only the capture holder.
+*           - Editing controls are modal: a TextBox being edited or an expanded Dropdown
+*             consumes the press outside itself and does not activate the controls below.
+*           - Only one discrete control can return a result per frame.
+*           - Control ids are not exposed: call order is stable when the UI layout is
+*             stable; dynamic lists should keep a stable draw order or use ScrollPanel.
 *
 *   CONFIGURATION:
 *       #define RAYGUI_IMPLEMENTATION
@@ -179,6 +175,21 @@
 *           Draw text bounds rectangles for debug
 *
 *   VERSIONS HISTORY:
+*       5.1 (30-Oct-2026) ADDED: Automatic control capture ids assigned in draw order
+*                         ADDED: Per-frame hit stack and direction arbitration (5 px drag threshold)
+*                         ADDED: Hover ownership (topmost hit / capture holder)
+*                         ADDED: Modal interception for TextBox and DropdownBox
+*                         ADDED: One discrete control result per frame
+*                         ADDED: Paired frame API: GuiBeginFrame()/GuiEndFrame() and
+*                                GuiBeginFromRaylib()/GuiEndFromRaylib()
+*                         ADDED: Internal single text editor (editId) and GuiIsEditing()
+*                         ADDED: Internal Dropdown open state, no caller-side edit flags
+*                         REDESIGNED: GuiValueBox/GuiValueBoxFloat use an internal GuiTextBox,
+*                                     text is persistent while editing and parsed only on commit
+*                         REMOVED: GuiSetCapturedId(), GuiPushId() and GuiPopId(), ids are automatic now
+*                         REMOVED: guiControlExclusiveMode/guiControlExclusiveRec, drag uses capture
+*                         REDESIGNED: WARNING: GuiTextBox/ValueBox/ValueBoxFloat/Spinner/DropdownBox
+*                                     no longer take an editMode pointer, gui manages focus internally
 *       5.0 (20-Jul-2026) ADDED: NEW control: GuiTabBar()
 *                         ADDED: Control capture: GuiSetCapturedId(), GuiGetCapturedId(), GuiPushId(), GuiPopId()
 *                         ADDED: Support up to 512 icons (v500)
@@ -388,9 +399,9 @@
 #define RAYGUI_H
 
 #define RAYGUI_VERSION_MAJOR 5
-#define RAYGUI_VERSION_MINOR 0
+#define RAYGUI_VERSION_MINOR 1
 #define RAYGUI_VERSION_PATCH 0
-#define RAYGUI_VERSION  "5.0"
+#define RAYGUI_VERSION  "5.1"
 
 #if !defined(RAYGUI_STANDALONE)
     #include "raylib.h"
@@ -863,12 +874,16 @@ RAYGUIAPI void GuiLoadStyleDefault(void);                       // Load style de
 RAYGUIAPI void GuiSetScissor(Rectangle rect);                   // Clip mouse interact outside the Rectangle
 
 // Control capture functions
-// NOTE: Capture is decided on the press frame (topmost drawn hit id wins), only that id can
-// interact until release; click-like results are returned on the release frame
-RAYGUIAPI void GuiSetCapturedId(int id);                        // Set id for the controls drawn next; 0 means "not capturable"
-RAYGUIAPI int GuiGetCapturedId(void);                           // Get current captured id (0 if no capture is active)
-RAYGUIAPI void GuiPushId(int id);                               // Push current id and set a new one for the controls drawn next
-RAYGUIAPI void GuiPopId(void);                                  // Restore previous id
+// NOTE: Controls are assigned an id automatically in draw order. On the press frame the
+// topmost hit control becomes the tentative owner; after the drag threshold the direction
+// arbitration confirms the final owner. Only that control can interact until release.
+// Frames must be paired: GuiBeginFromRaylib()/GuiEndFromRaylib() or GuiBeginFrame()/GuiEndFrame().
+RAYGUIAPI void GuiBeginFrame(void);                             // Start a frame (standalone/backend frame entry)
+RAYGUIAPI void GuiEndFrame(void);                               // End a frame started with GuiBeginFrame()
+RAYGUIAPI void GuiBeginFromRaylib(void);                        // Start a frame from raylib input
+RAYGUIAPI void GuiEndFromRaylib(void);                          // End a frame started with GuiBeginFromRaylib()
+RAYGUIAPI unsigned int GuiGetCapturedId(void);                  // Get current captured id (0 if no capture is active)
+RAYGUIAPI bool GuiIsEditing(void);                              // Check if a text control is currently being edited
 
 // Tooltips management functions
 RAYGUIAPI void GuiEnableTooltip(void);                          // Enable gui tooltips (global state)
@@ -907,11 +922,11 @@ RAYGUIAPI int GuiToggleSlider(Rectangle bounds, const char *text, int *active); 
 RAYGUIAPI int GuiCheckBox(Rectangle bounds, const char *text, bool *checked);                          // Check Box control, returns true when active
 RAYGUIAPI int GuiComboBox(Rectangle bounds, const char *text, int *active);                            // Combo Box control
 
-RAYGUIAPI int GuiDropdownBox(Rectangle bounds, const char *text, int *active, bool editMode);          // Dropdown Box control
-RAYGUIAPI int GuiSpinner(Rectangle bounds, const char *text, int *value, int minValue, int maxValue, bool editMode); // Spinner control
-RAYGUIAPI int GuiValueBox(Rectangle bounds, const char *text, int *value, int minValue, int maxValue, bool editMode); // Value Box control, updates input text with numbers
-RAYGUIAPI int GuiValueBoxFloat(Rectangle bounds, const char *text, char *textValue, float *value, bool editMode); // Value box control for float values
-RAYGUIAPI int GuiTextBox(Rectangle bounds, char *text, int textSize, bool editMode);                   // Text Box control, updates input text
+RAYGUIAPI int GuiDropdownBox(Rectangle bounds, const char *text, int *active);          // Dropdown Box control
+RAYGUIAPI int GuiSpinner(Rectangle bounds, const char *text, int *value, int minValue, int maxValue); // Spinner control
+RAYGUIAPI int GuiValueBox(Rectangle bounds, const char *text, int *value, int minValue, int maxValue); // Value Box control, updates input text with numbers
+RAYGUIAPI int GuiValueBoxFloat(Rectangle bounds, const char *text, char *textValue, float *value); // Value box control for float values
+RAYGUIAPI int GuiTextBox(Rectangle bounds, char *text, int textSize);                   // Text Box control, updates input text
 
 RAYGUIAPI int GuiSlider(Rectangle bounds, const char *textLeft, const char *textRight, float *value, float minValue, float maxValue); // Slider control
 RAYGUIAPI int GuiSliderBar(Rectangle bounds, const char *textLeft, const char *textRight, float *value, float minValue, float maxValue); // Slider Bar control
@@ -1586,24 +1601,101 @@ static unsigned int guiIconFontOffsetY = 0;     // Gui icon font atlas offset (i
 static Rectangle scissorRectangle = { 0 };
 
 // Control capture state
-// NOTE: Capture is decided on the press frame: every hit control registers its id and the
-// last one drawn (topmost) wins. Only that id can interact until the button is released.
-static int curGuiId = 0;                        // Id assigned to the controls drawn next (set by GuiSetCapturedId())
-static int captureGuiId = 0;                    // Topmost control id captured on the press frame (0 if none)
-static bool captureEnabled = false;             // Capture enabled flag, set the first time a non-zero id is assigned
-static bool captureHeld = false;                // A press is in flight (press frame .. release frame)
-static bool captureAnyHit = false;              // A control was under the pointer on the press frame
-static bool capturePicked = false;              // Capture candidates already reset for the current press frame
+// NOTE: Controls are assigned an id in draw order every frame. Every hit control registers
+// itself in a per-frame hit stack; the press frame fixes the tentative owner (topmost hit)
+// and then, once the pointer moves beyond the drag threshold, direction arbitration decides
+// the final owner. Only the captured id can interact until release.
+#define RAYGUI_MAX_HIT_STACK            32
+#define RAYGUI_DRAG_THRESHOLD            5.0f
 
-#define RAYGUI_MAX_CAPTURE_ID_STACK 16
-static int guiCaptureIdStack[RAYGUI_MAX_CAPTURE_ID_STACK] = { 0 };
-static int guiCaptureIdStackCount = 0;
+#if !defined(RAYGUI_VALUEBOX_MAX_CHARS)
+    #define RAYGUI_VALUEBOX_MAX_CHARS    32      // ValueBox edit buffer size (including terminator)
+#endif
+#define RAYGUI_MAX_VALUEBOX_BUFFERS      32      // Persistent text buffers for ValueBox editing
+
+typedef enum {
+    GUI_DRAG_NONE = 0,
+    GUI_DRAG_HORIZONTAL = 1 << 0,
+    GUI_DRAG_VERTICAL = 1 << 1,
+    GUI_DRAG_BOTH = GUI_DRAG_HORIZONTAL | GUI_DRAG_VERTICAL
+} GuiDragDirection;
+
+typedef struct GuiHitEntry {
+    unsigned int id;                // Control id
+    Rectangle bounds;               // Control bounds for hit tests
+    int dragDirection;              // GuiDragDirection flags supported by the control
+} GuiHitEntry;
+
+// Persistent text buffer used by GuiValueBox while its internal GuiTextBox is edited
+typedef struct GuiValueBoxBuffer {
+    unsigned int id;                // ValueBox id that owns this buffer
+    char text[RAYGUI_VALUEBOX_MAX_CHARS + 1];
+} GuiValueBoxBuffer;
+
+typedef struct GuiCaptureState {
+    // Capture ownership
+    unsigned int capturedId;        // Confirmed owner
+    unsigned int tentativeId;       // Press frame candidate (topmost hit)
+    unsigned int hoverId;           // Hover target used while drawing this frame
+    unsigned int hoverIdNext;       // Resolved at frame end for the next frame
+    unsigned int modalId;           // Editing TextBox / expanded Dropdown
+    unsigned int commitId;          // Pending commit delivered on release
+    unsigned int frameCounter;      // Frame counter, used to expire stale modals
+    unsigned int modalFrame;        // Frame stamp of the last modal registration
+
+    // Hit stack
+    GuiHitEntry hitStack[RAYGUI_MAX_HIT_STACK];
+    int hitStackCount;
+    GuiHitEntry pressHitStack[RAYGUI_MAX_HIT_STACK];
+    int pressHitStackCount;
+
+    // Pointer / capture state
+    Vector2 pointerPosition;
+    Vector2 startPos;
+    bool inputDown;
+    bool inputPressed;
+    bool inputReleased;
+    int dragDirection;              // Arbitration result (GuiDragDirection)
+    bool isConfirmed;               // Capture confirmed (threshold or release)
+    bool didDrag;                   // Threshold crossed
+    bool pressFrame;
+    bool releaseFrame;
+    bool frameTriggered;            // A discrete control already triggered this frame
+    unsigned int triggeredId;
+
+    // Current control being executed
+    unsigned int currentId;
+    Rectangle currentBounds;
+    int currentDirection;
+
+    // Text editing state (single active editor, identified by editId)
+    unsigned int editId;
+    int textBoxCursorIndex;
+    int autoCursorCounter;
+
+    // Dropdown open state (single open popup, identified by dropdownOpenId)
+    unsigned int dropdownOpenId;
+    unsigned int dropdownOpenFrame;
+
+    // GuiTextInputBox internal text box id, used to know if its editor is active
+    unsigned int dialogTextId;
+
+    // Persistent text buffers for GuiValueBox (keyed by automatic id)
+    GuiValueBoxBuffer valueBoxBuffers[RAYGUI_MAX_VALUEBOX_BUFFERS];
+    int valueBoxBufferCount;
+
+    // Automatic id assignment
+    unsigned int nextId;
+    unsigned int scopeId;
+    int scopeDepth;
+
+    bool inFrame;
+} GuiCaptureState;
+
+static GuiCaptureState guiCapture = { 0 };
 
 static bool guiTooltip = false;                 // Tooltip enabled/disabled
 static const char *guiTooltipPtr = NULL;        // Tooltip string pointer (string provided by user)
-
-static bool guiControlExclusiveMode = false;    // Gui control exclusive mode (no inputs processed except current control)
-static Rectangle guiControlExclusiveRec = { 0 }; // Gui control exclusive bounds rectangle, used as an unique identifier
 
 static int textBoxCursorIndex = 0;              // Cursor index, shared by all GuiTextBox*()
 //static int blinkCursorFrameCounter = 0;       // Frame counter for cursor blinking
@@ -1638,7 +1730,17 @@ static bool guiStyleLoaded = false;         // Style loaded flag for lazy style 
 #define KEY_DOWN            264
 #define KEY_UP              265
 #define KEY_BACKSPACE       259
+#define KEY_DELETE          261
 #define KEY_ENTER           257
+#define KEY_ESCAPE          256
+#define KEY_HOME            268
+#define KEY_END             269
+#define KEY_MINUS            45
+#define KEY_V                86
+#define KEY_KP_ENTER        335
+#define KEY_LEFT_SHIFT      340
+#define KEY_LEFT_CONTROL    341
+#define KEY_RIGHT_CONTROL   345
 
 #define MOUSE_LEFT_BUTTON     0
 
@@ -1804,90 +1906,352 @@ int GuiGetStyle(int control, int property)
     return guiStyle[control*(RAYGUI_MAX_PROPS_BASE + RAYGUI_MAX_PROPS_EXTENDED) + property];
 }
 
-// Update capture state for the current frame
-// NOTE: Called at the beginning of every control update, it only updates capture bookkeeping
-static void GuiUpdateCapture(void)
+//----------------------------------------------------------------------------------
+// Control capture helpers
+// NOTE: Controls read the pointer snapshot taken at GuiBegin(), register hits while drawing
+// and only run interaction side effects when their automatic id owns the capture.
+//----------------------------------------------------------------------------------
+static Vector2 GuiPointerPosition(void) { return guiCapture.pointerPosition; }
+static bool GuiIsPointerDown(void) { return guiCapture.inputDown; }
+static bool GuiIsPointerPressed(void) { return guiCapture.inputPressed; }
+static bool GuiIsPointerReleased(void) { return guiCapture.inputReleased; }
+
+// Check if the pointer is inside the given bounds (respecting the scissor rectangle)
+static bool GuiHitTest(Rectangle bounds)
 {
-    if (GUI_BUTTON_PRESSED)
-    {
-        // Start a new press cycle once per frame and collect hit candidates during the frame
-        if (!capturePicked)
-        {
-            captureGuiId = 0;
-            captureAnyHit = false;
-            captureHeld = captureEnabled;
-            capturePicked = true;
-        }
-    }
-    else if (GUI_BUTTON_RELEASED)
-    {
-        // Keep the capture valid during the release frame, it is cleared on the next idle frame
-        capturePicked = false;
-    }
-    else if (!GUI_BUTTON_DOWN)
-    {
-        // No interaction in flight: clear capture
-        captureGuiId = 0;
-        captureHeld = false;
-        captureAnyHit = false;
-        capturePicked = false;
-    }
+    return CheckScissorCollisionPointRec(guiCapture.pointerPosition, bounds);
 }
 
-// Check if the control with current id can interact this frame
-// NOTE: Does not require a pointer hit, used by edit-mode and container controls
-static bool GuiCanInteract(void)
+// Register a hit entry in the current frame hit stack
+static void GuiAddHit(unsigned int id, Rectangle bounds, int dragDirection)
 {
-    // Press frame is capture-only: no control is allowed to run side effects yet
-    if (GUI_BUTTON_PRESSED) return captureEnabled? false : !guiLocked;
+    if (guiCapture.hitStackCount >= RAYGUI_MAX_HIT_STACK) return; // Stack full: drop extra hits
 
-    if (!captureHeld) return !guiLocked;
-
-    // Press started outside every control: block all controls until release
-    if (!captureAnyHit) return false;
-
-    // Press started on a control without id: keep legacy behavior
-    if (captureGuiId == 0) return !guiLocked;
-
-    // While held/released only the captured id can interact
-    return !guiLocked && (curGuiId != 0) && (curGuiId == captureGuiId);
+    GuiHitEntry *entry = &guiCapture.hitStack[guiCapture.hitStackCount];
+    entry->id = id;
+    entry->bounds = bounds;
+    entry->dragDirection = dragDirection;
+    guiCapture.hitStackCount++;
 }
 
-// Register current id as a capture candidate when the pointer is over the control
-// NOTE: Returns true only when this control is allowed to run interaction side effects
+// Assign the id for the control being drawn next
+static unsigned int GuiNextControlId(void)
+{
+    unsigned int id = (guiCapture.scopeDepth > 0)? guiCapture.scopeId : guiCapture.nextId++;
+    guiCapture.currentId = id;
+    return id;
+}
+
+// Start an interactive control: assign its id and register it as a hit when over it
+static void GuiControlBegin(Rectangle bounds, int dragDirection)
+{
+    GuiNextControlId();
+    guiCapture.currentBounds = bounds;
+    guiCapture.currentDirection = dragDirection;
+    if (GuiHitTest(bounds)) GuiAddHit(guiCapture.currentId, bounds, dragDirection);
+}
+
+// Register an additional hit region for the current control (for example a selector button)
+static void GuiRegisterCurrentHit(Rectangle bounds)
+{
+    if (GuiHitTest(bounds)) GuiAddHit(guiCapture.currentId, bounds, guiCapture.currentDirection);
+}
+
+// Check if the current control owns the confirmed capture
+static bool GuiIsCapturedControl(void)
+{
+    return (guiCapture.currentId != 0) && (guiCapture.currentId == guiCapture.capturedId) && guiCapture.isConfirmed;
+}
+
+// Check if the current control is the hover target for this frame
+static bool GuiIsHovered(void)
+{
+    return (guiCapture.currentId != 0) && (guiCapture.currentId == guiCapture.hoverId);
+}
+
+// Check if the current control is the active modal control
+static bool GuiIsModal(void)
+{
+    return (guiCapture.currentId != 0) && (guiCapture.currentId == guiCapture.modalId);
+}
+
+// Register the current control as modal (editing TextBox or expanded Dropdown)
+static void GuiSetModal(void)
+{
+    guiCapture.modalId = guiCapture.currentId;
+    guiCapture.modalFrame = guiCapture.frameCounter;
+}
+
+// Clear the current control modal state
+static void GuiClearModal(void)
+{
+    if (guiCapture.modalId == guiCapture.currentId) guiCapture.modalId = 0;
+}
+
+// Get (or allocate) the persistent text buffer for a ValueBox
+static GuiValueBoxBuffer *GuiGetValueBoxBuffer(unsigned int id)
+{
+    for (int i = 0; i < guiCapture.valueBoxBufferCount; i++)
+    {
+        if (guiCapture.valueBoxBuffers[i].id == id) return &guiCapture.valueBoxBuffers[i];
+    }
+
+    if (guiCapture.valueBoxBufferCount >= RAYGUI_MAX_VALUEBOX_BUFFERS) return NULL;
+
+    GuiValueBoxBuffer *buffer = &guiCapture.valueBoxBuffers[guiCapture.valueBoxBufferCount];
+    buffer->id = id;
+    buffer->text[0] = '\0';
+    guiCapture.valueBoxBufferCount++;
+
+    return buffer;
+}
+
+// Enter text edit mode for the current control
+// NOTE: editId is the single source of truth: only one text control can be edited at a
+// time. Taking the focus away from another control schedules its commit for release.
+static void GuiBeginTextEdit(int cursorIndex)
+{
+    if ((guiCapture.editId != 0) && (guiCapture.editId != guiCapture.currentId))
+        guiCapture.commitId = guiCapture.editId;
+
+    guiCapture.editId = guiCapture.currentId;
+    guiCapture.textBoxCursorIndex = cursorIndex;
+
+    GuiSetModal();
+}
+
+// Check if the current control is allowed to run its interaction update
+// NOTE: Press frame is capture-only; below the drag threshold no control reacts
 static bool GuiHitControl(void)
 {
-    if (GUI_BUTTON_PRESSED)
-    {
-        // Capture disabled: keep legacy immediate-mode behavior
-        if (!captureEnabled) return !guiLocked;
+    unsigned int id = guiCapture.currentId;
+    if (id == 0) return false;
 
-        // Capture-only frame: register candidate (last hit = topmost drawn) and wait for release
-        captureAnyHit = true;
-        if (curGuiId != 0) captureGuiId = curGuiId;
-        return false;
+    // Modal controls own the pointer until they finish, even when the UI is locked
+    if (GuiIsModal()) return true;
+
+    if (guiLocked) return false;
+
+    // Press frame only registers capture candidates, no side effects
+    if (guiCapture.inputPressed) return false;
+
+    if (guiCapture.inputDown)
+    {
+        if (!guiCapture.isConfirmed) return false;    // Drag threshold not reached yet
+        return (id == guiCapture.capturedId);
     }
 
-    return GuiCanInteract();
+    if (guiCapture.inputReleased)
+    {
+        if (!guiCapture.isConfirmed) return false;
+        if (id != guiCapture.capturedId) return false;
+
+        // Click-like releases must finish inside the control. A discrete control dragged
+        // outside is cancelled; a continuous control may finish a drag outside its bounds.
+        if (!GuiHitTest(guiCapture.currentBounds) &&
+            ((guiCapture.currentDirection == GUI_DRAG_NONE) || !guiCapture.didDrag)) return false;
+
+        return true;
+    }
+
+    // Idle frame: only the topmost hover target may run hover related logic
+    return GuiIsHovered();
 }
 
-// Force capture for modal controls (for example an open dropdown box)
-// NOTE: Modal controls keep owning the interaction even if the pointer is outside their
-// bounds and even when the rest of the UI is locked with GuiLock()
-static bool GuiCaptureSelf(void)
+// Check if the current control can run side effects (used by edit mode and drag branches)
+static bool GuiCanInteract(void)
 {
-    if (GUI_BUTTON_PRESSED && captureEnabled)
+    unsigned int id = guiCapture.currentId;
+    if (id == 0) return false;
+    if (GuiIsModal()) return true;
+    if (guiLocked) return false;
+    if (guiCapture.inputPressed) return false;
+    if (!guiCapture.isConfirmed) return false;
+
+    return (id == guiCapture.capturedId);
+}
+
+// Deliver a discrete result for the current control, allowing only one id per frame
+static int GuiDiscreteResult(int result)
+{
+    if (result == RESULT_NONE) return RESULT_NONE;
+    if (guiCapture.frameTriggered && (guiCapture.triggeredId != guiCapture.currentId)) return RESULT_NONE;
+
+    guiCapture.frameTriggered = true;
+    guiCapture.triggeredId = guiCapture.currentId;
+
+    return result;
+}
+
+//----------------------------------------------------------------------------------
+// Frame management
+//----------------------------------------------------------------------------------
+
+// Start a new gui frame
+// NOTE: Automatic ids, hover and the hit stack are rebuilt every frame
+void GuiBeginFrame(void)
+{
+    if (guiCapture.inFrame)
     {
-        captureAnyHit = true;
-        if (curGuiId != 0) captureGuiId = curGuiId;
-        return false;
+        RAYGUI_LOG("WARNING: GuiBeginFrame() called before GuiEndFrame(), closing previous frame\n");
+        GuiEndFrame();
     }
 
-    if (!captureHeld) return true;
-    if (!captureAnyHit) return false;
-    if (captureGuiId == 0) return true;
+    guiCapture.inFrame = true;
+    guiCapture.frameCounter++;
+    guiCapture.nextId = 1;
+    guiCapture.scopeDepth = 0;
+    guiCapture.hitStackCount = 0;
+    guiCapture.currentId = 0;
+    guiCapture.frameTriggered = false;
+    guiCapture.triggeredId = 0;
+    guiCapture.pressFrame = false;
+    guiCapture.releaseFrame = false;
 
-    return (curGuiId != 0) && (curGuiId == captureGuiId);
+    // No editor and no pending commit: ValueBox text buffers are rebuilt from values
+    if ((guiCapture.editId == 0) && (guiCapture.commitId == 0)) guiCapture.valueBoxBufferCount = 0;
+
+    guiCapture.pointerPosition = GUI_POINTER_POSITION;
+    guiCapture.inputPressed = (GUI_BUTTON_PRESSED)? true : false;
+    guiCapture.inputReleased = (GUI_BUTTON_RELEASED)? true : false;
+    guiCapture.inputDown = (GUI_BUTTON_DOWN)? true : false;
+
+    guiCapture.hoverId = (guiCapture.capturedId != 0)? guiCapture.capturedId : guiCapture.hoverIdNext;
+
+    if (guiCapture.inputPressed)
+    {
+        guiCapture.pressFrame = true;
+        guiCapture.startPos = guiCapture.pointerPosition;
+        guiCapture.tentativeId = guiCapture.modalId;
+        guiCapture.capturedId = 0;
+        guiCapture.isConfirmed = false;
+        guiCapture.didDrag = false;
+        guiCapture.dragDirection = GUI_DRAG_NONE;
+        guiCapture.pressHitStackCount = 0;
+
+        // Same frame press + release cannot be delivered as an interaction
+        if (guiCapture.inputReleased) guiCapture.releaseFrame = true;
+    }
+    else if (guiCapture.inputReleased)
+    {
+        guiCapture.releaseFrame = true;
+
+        // Release before the drag threshold: the topmost hit becomes a click
+        if (!guiCapture.isConfirmed)
+        {
+            guiCapture.capturedId = guiCapture.tentativeId;
+            guiCapture.isConfirmed = true;
+        }
+    }
+    else if (guiCapture.inputDown && (guiCapture.tentativeId != 0) && !guiCapture.isConfirmed)
+    {
+        // Modal controls keep the capture regardless of movement; a pending text commit
+        // (outside press) also blocks direction arbitration until release
+        if (((guiCapture.modalId != 0) && (guiCapture.tentativeId == guiCapture.modalId)) ||
+            (guiCapture.commitId != 0)) return;
+
+        float dx = guiCapture.pointerPosition.x - guiCapture.startPos.x;
+        float dy = guiCapture.pointerPosition.y - guiCapture.startPos.y;
+
+        if ((dx*dx + dy*dy) >= (RAYGUI_DRAG_THRESHOLD*RAYGUI_DRAG_THRESHOLD))
+        {
+            int direction = (fabsf(dx) >= fabsf(dy))? GUI_DRAG_HORIZONTAL : GUI_DRAG_VERTICAL;
+            guiCapture.dragDirection = direction;
+            guiCapture.didDrag = true;
+            guiCapture.capturedId = 0;
+
+            // Direction arbitration: topmost hit control supporting the drag direction wins.
+            // If no control supports the direction, keep the tentative (topmost) owner so
+            // regular controls such as buttons still trigger on release.
+            for (int i = guiCapture.pressHitStackCount - 1; i >= 0; i--)
+            {
+                if ((guiCapture.pressHitStack[i].dragDirection & direction) != 0)
+                {
+                    guiCapture.capturedId = guiCapture.pressHitStack[i].id;
+                    break;
+                }
+            }
+
+            if (guiCapture.capturedId == 0) guiCapture.capturedId = guiCapture.tentativeId;
+
+            guiCapture.isConfirmed = true;
+        }
+    }
+    else if (!guiCapture.inputDown)
+    {
+        guiCapture.capturedId = 0;
+        guiCapture.tentativeId = 0;
+        guiCapture.isConfirmed = false;
+        guiCapture.didDrag = false;
+        guiCapture.dragDirection = GUI_DRAG_NONE;
+        guiCapture.pressHitStackCount = 0;
+        guiCapture.commitId = 0;
+    }
+}
+
+// End the current gui frame and resolve the capture/hover state
+void GuiEndFrame(void)
+{
+    if (!guiCapture.inFrame)
+    {
+        RAYGUI_LOG("WARNING: GuiEndFrame() called without GuiBeginFrame()\n");
+        return;
+    }
+
+    if (guiCapture.pressFrame)
+    {
+        guiCapture.pressHitStackCount = guiCapture.hitStackCount;
+        for (int i = 0; i < guiCapture.hitStackCount; i++) guiCapture.pressHitStack[i] = guiCapture.hitStack[i];
+
+        // Press on a control without a modal: tentative owner is the topmost hit
+        if ((guiCapture.tentativeId == 0) && (guiCapture.hitStackCount > 0))
+            guiCapture.tentativeId = guiCapture.hitStack[guiCapture.hitStackCount - 1].id;
+    }
+
+    // Drop modals that were not drawn during this frame; the active text editor goes with it
+    if ((guiCapture.modalId != 0) && (guiCapture.modalFrame != guiCapture.frameCounter))
+    {
+        guiCapture.modalId = 0;
+        guiCapture.editId = 0;
+    }
+
+    // Dropdown popups expire when their control is no longer drawn
+    if ((guiCapture.dropdownOpenId != 0) && (guiCapture.dropdownOpenFrame != guiCapture.frameCounter))
+        guiCapture.dropdownOpenId = 0;
+
+    if (guiCapture.capturedId != 0) guiCapture.hoverIdNext = guiCapture.capturedId;
+    else if (guiCapture.hitStackCount > 0) guiCapture.hoverIdNext = guiCapture.hitStack[guiCapture.hitStackCount - 1].id;
+    else guiCapture.hoverIdNext = 0;
+
+    guiCapture.inFrame = false;
+    guiCapture.currentId = 0;
+    guiCapture.scopeDepth = 0;
+}
+
+// Begin a frame using the current raylib/backend input state
+// NOTE: phase-1 transitional entry point, replaced by GuiBegin(GuiInput*, int) in phase 2
+void GuiBeginFromRaylib(void)
+{
+    GuiBeginFrame();
+}
+
+// End a frame started with GuiBeginFromRaylib()
+void GuiEndFromRaylib(void)
+{
+    GuiEndFrame();
+}
+
+// Get the current captured control id (0 if no capture is active)
+unsigned int GuiGetCapturedId(void)
+{
+    if (guiCapture.isConfirmed) return guiCapture.capturedId;
+    return guiCapture.tentativeId;
+}
+
+// Check if any text control is currently being edited
+bool GuiIsEditing(void)
+{
+    return (guiCapture.editId != 0);
 }
 
 //----------------------------------------------------------------------------------
@@ -2111,17 +2475,24 @@ int GuiScrollPanel(Rectangle bounds, const char *text, Rectangle content, Vector
 
     // Update control
     //--------------------------------------------------------------------
-    GuiUpdateCapture();
-    if ((state != STATE_DISABLED) && GuiCanInteract())
+    GuiControlBegin(bounds, GUI_DRAG_BOTH);
+    unsigned int panelId = guiCapture.currentId;
+    float prevScrollX = scrollPos.x;
+    float prevScrollY = scrollPos.y;
+
+    if (state != STATE_DISABLED)
     {
-        Vector2 mousePoint = GUI_POINTER_POSITION;
-
-        // Check button state
-        if (CheckScissorCollisionPointRec(mousePoint, bounds))
+        // Panel hover/state: only when no other control owns the capture
+        if (GuiHitTest(bounds) && ((guiCapture.capturedId == 0) || (guiCapture.capturedId == panelId)))
         {
-            if (GUI_BUTTON_DOWN) state = STATE_PRESSED;
-            else state = STATE_FOCUSED;
+            if (GuiIsPointerDown() && (guiCapture.tentativeId == panelId)) state = STATE_PRESSED;
+            else if (guiCapture.hoverId == panelId) state = STATE_FOCUSED;
+        }
 
+        // Wheel scrolling is independent from capture, only blocked by modals and drags
+        if (GuiHitTest(bounds) && (guiCapture.modalId == 0) &&
+            ((guiCapture.capturedId == 0) || (guiCapture.capturedId == panelId)))
+        {
 #if defined(SUPPORT_SCROLLBAR_KEY_INPUT)
             if (hasHorizontalScrollBar)
             {
@@ -2198,6 +2569,9 @@ int GuiScrollPanel(Rectangle bounds, const char *text, Rectangle content, Vector
 
     if (scroll != NULL) *scroll = scrollPos;
 
+    // Continuous control: only report when the scroll value actually changed
+    if ((prevScrollX != scrollPos.x) || (prevScrollY != scrollPos.y)) result = RESULT_CHANGED;
+
     return result;
 }
 
@@ -2228,18 +2602,16 @@ int GuiButton(Rectangle bounds, const char *text)
 
     // Update control
     //--------------------------------------------------------------------
-    GuiUpdateCapture();
-    if ((state != STATE_DISABLED) && !guiControlExclusiveMode)
+    GuiControlBegin(bounds, GUI_DRAG_NONE);
+    if (state != STATE_DISABLED)
     {
-        Vector2 mousePoint = GUI_POINTER_POSITION;
-
         // Check button state
-        if (CheckScissorCollisionPointRec(mousePoint, bounds) && GuiHitControl())
+        if (GuiHitControl())
         {
-            if (GUI_BUTTON_DOWN) state = STATE_PRESSED;
+            if (GuiIsPointerDown()) state = STATE_PRESSED;
             else state = STATE_FOCUSED;
 
-            if (GUI_BUTTON_RELEASED) result = RESULT_PRESSED;
+            if (GuiIsPointerReleased()) result = GuiDiscreteResult(RESULT_PRESSED);
         }
     }
     //--------------------------------------------------------------------
@@ -2267,18 +2639,16 @@ int GuiLabelButton(Rectangle bounds, const char *text)
 
     // Update control
     //--------------------------------------------------------------------
-    GuiUpdateCapture();
-    if ((state != STATE_DISABLED) && !guiControlExclusiveMode)
+    GuiControlBegin(bounds, GUI_DRAG_NONE);
+    if (state != STATE_DISABLED)
     {
-        Vector2 mousePoint = GUI_POINTER_POSITION;
-
         // Check checkbox state
-        if (CheckScissorCollisionPointRec(mousePoint, bounds) && GuiHitControl())
+        if (GuiHitControl())
         {
-            if (GUI_BUTTON_DOWN) state = STATE_PRESSED;
+            if (GuiIsPointerDown()) state = STATE_PRESSED;
             else state = STATE_FOCUSED;
 
-            if (GUI_BUTTON_RELEASED) result = RESULT_PRESSED;
+            if (GuiIsPointerReleased()) result = GuiDiscreteResult(RESULT_PRESSED);
         }
     }
     //--------------------------------------------------------------------
@@ -2302,21 +2672,19 @@ int GuiToggle(Rectangle bounds, const char *text, bool *active)
 
     // Update control
     //--------------------------------------------------------------------
-    GuiUpdateCapture();
-    if ((state != STATE_DISABLED) && !guiControlExclusiveMode)
+    GuiControlBegin(bounds, GUI_DRAG_NONE);
+    if (state != STATE_DISABLED)
     {
-        Vector2 mousePoint = GUI_POINTER_POSITION;
-
         // Check toggle button state
-        if (CheckScissorCollisionPointRec(mousePoint, bounds) && GuiHitControl())
+        if (GuiHitControl())
         {
-            if (GUI_BUTTON_DOWN) state = STATE_PRESSED;
-            else if (GUI_BUTTON_RELEASED)
+            if (GuiIsPointerDown()) state = STATE_PRESSED;
+            else if (GuiIsPointerReleased())
             {
                 state = STATE_NORMAL;
                 *active = !(*active);
 
-                result = RESULT_CHANGED;
+                result = GuiDiscreteResult(RESULT_CHANGED);
             }
             else state = STATE_FOCUSED;
         }
@@ -2458,19 +2826,17 @@ int GuiToggleSlider(Rectangle bounds, const char *text, int *active)
 
     // Update control
     //--------------------------------------------------------------------
-    GuiUpdateCapture();
-    if ((state != STATE_DISABLED) && !guiControlExclusiveMode)
+    GuiControlBegin(bounds, GUI_DRAG_NONE);
+    if (state != STATE_DISABLED)
     {
-        Vector2 mousePoint = GUI_POINTER_POSITION;
-
-        if (CheckScissorCollisionPointRec(mousePoint, bounds) && GuiHitControl())
+        if (GuiHitControl())
         {
-            if (GUI_BUTTON_DOWN) state = STATE_PRESSED;
-            else if (GUI_BUTTON_RELEASED)
+            if (GuiIsPointerDown()) state = STATE_PRESSED;
+            else if (GuiIsPointerReleased())
             {
                 state = STATE_PRESSED;
                 (*active)++;
-                result = 1;
+                result = GuiDiscreteResult(RESULT_CHANGED);
             }
             else state = STATE_FOCUSED;
         }
@@ -2532,29 +2898,27 @@ int GuiCheckBox(Rectangle bounds, const char *text, bool *checked)
 
     // Update control
     //--------------------------------------------------------------------
-    GuiUpdateCapture();
-    if ((state != STATE_DISABLED) && !guiControlExclusiveMode)
+    Rectangle totalBounds = {
+        (GuiGetStyle(CHECKBOX, TEXT_ALIGNMENT) == TEXT_ALIGN_LEFT)? textBounds.x : bounds.x,
+        bounds.y,
+        bounds.width + textBounds.width + GuiGetStyle(CHECKBOX, TEXT_PADDING),
+        bounds.height,
+    };
+
+    GuiControlBegin(totalBounds, GUI_DRAG_NONE);
+    if (state != STATE_DISABLED)
     {
-        Vector2 mousePoint = GUI_POINTER_POSITION;
-
-        Rectangle totalBounds = {
-            (GuiGetStyle(CHECKBOX, TEXT_ALIGNMENT) == TEXT_ALIGN_LEFT)? textBounds.x : bounds.x,
-            bounds.y,
-            bounds.width + textBounds.width + GuiGetStyle(CHECKBOX, TEXT_PADDING),
-            bounds.height,
-        };
-
         // Check checkbox state
-        if (CheckScissorCollisionPointRec(mousePoint, totalBounds) && GuiHitControl())
+        if (GuiHitControl())
         {
-            if (GUI_BUTTON_DOWN) state = STATE_PRESSED;
+            if (GuiIsPointerDown()) state = STATE_PRESSED;
             else state = STATE_FOCUSED;
 
-            if (GUI_BUTTON_RELEASED)
+            if (GuiIsPointerReleased())
             {
                 *checked = !(*checked);
 
-                result = RESULT_CHANGED;
+                result = GuiDiscreteResult(RESULT_CHANGED);
             }
         }
     }
@@ -2589,6 +2953,8 @@ int GuiComboBox(Rectangle bounds, const char *text, int *active)
     int prevActive = (active == NULL)? 0 : *active;
     if (active == NULL) active = &temp;
 
+    Rectangle comboBounds = bounds;    // Main box + selector, used for capture hit tests
+
     bounds.width -= (GuiGetStyle(COMBOBOX, COMBO_BUTTON_WIDTH) + GuiGetStyle(COMBOBOX, COMBO_BUTTON_SPACING));
 
     Rectangle selector = { (float)bounds.x + bounds.width + GuiGetStyle(COMBOBOX, COMBO_BUTTON_SPACING),
@@ -2603,18 +2969,17 @@ int GuiComboBox(Rectangle bounds, const char *text, int *active)
 
     // Update control
     //--------------------------------------------------------------------
-    GuiUpdateCapture();
-    if ((state != STATE_DISABLED) && (itemCount > 1) && !guiControlExclusiveMode)
-    {
-        Vector2 mousePoint = GUI_POINTER_POSITION;
+    GuiControlBegin(comboBounds, GUI_DRAG_NONE);
+    GuiRegisterCurrentHit(selector);
 
-        if ((CheckScissorCollisionPointRec(mousePoint, bounds) ||
-            CheckScissorCollisionPointRec(mousePoint, selector)) && GuiHitControl())
+    if ((state != STATE_DISABLED) && (itemCount > 1))
+    {
+        if (GuiHitControl())
         {
-            if (GUI_BUTTON_DOWN) state = STATE_PRESSED;
+            if (GuiIsPointerDown()) state = STATE_PRESSED;
             else state = STATE_FOCUSED;
 
-            if (GUI_BUTTON_RELEASED)
+            if (GuiIsPointerReleased())
             {
                 *active += 1;
                 if (*active >= itemCount) *active = 0;      // Cyclic combobox
@@ -2622,7 +2987,7 @@ int GuiComboBox(Rectangle bounds, const char *text, int *active)
         }
     }
 
-    if (prevActive != *active) result = RESULT_CHANGED;
+    if (prevActive != *active) result = GuiDiscreteResult(RESULT_CHANGED);
     //--------------------------------------------------------------------
 
     // Draw control
@@ -2631,14 +2996,17 @@ int GuiComboBox(Rectangle bounds, const char *text, int *active)
     GuiDrawRectangle(bounds, GuiGetStyle(COMBOBOX, BORDER_WIDTH), GetColor(GuiGetStyle(COMBOBOX, BORDER + (state*3))), GetColor(GuiGetStyle(COMBOBOX, BASE + (state*3))));
     GuiDrawText(items[*active], GetTextBounds(COMBOBOX, bounds), GuiGetStyle(COMBOBOX, TEXT_ALIGNMENT), GetColor(GuiGetStyle(COMBOBOX, TEXT + (state*3))));
 
-    // Draw selector using a custom button
+    // Draw selector using a custom button, sharing the combo id so it captures as one control
     // NOTE: BORDER_WIDTH and TEXT_ALIGNMENT forced values
     int tempBorderWidth = GuiGetStyle(BUTTON, BORDER_WIDTH);
     int tempTextAlign = GuiGetStyle(BUTTON, TEXT_ALIGNMENT);
     GuiSetStyle(BUTTON, BORDER_WIDTH, 1);
     GuiSetStyle(BUTTON, TEXT_ALIGNMENT, TEXT_ALIGN_CENTER);
 
+    guiCapture.scopeId = guiCapture.currentId;
+    guiCapture.scopeDepth++;
     GuiButton(selector, TextFormat("%i/%i", *active + 1, itemCount));
+    guiCapture.scopeDepth--;
 
     GuiSetStyle(BUTTON, TEXT_ALIGNMENT, tempTextAlign);
     GuiSetStyle(BUTTON, BORDER_WIDTH, tempBorderWidth);
@@ -2648,8 +3016,8 @@ int GuiComboBox(Rectangle bounds, const char *text, int *active)
 }
 
 // Dropdown Box control
-// NOTE: Returns mouse click
-int GuiDropdownBox(Rectangle bounds, const char *text, int *active, bool editMode)
+// NOTE: Returns mouse click; the open/closed state is managed internally by gui
+int GuiDropdownBox(Rectangle bounds, const char *text, int *active)
 {
     int result = RESULT_NONE;
     GuiState state = guiState;
@@ -2676,74 +3044,74 @@ int GuiDropdownBox(Rectangle bounds, const char *text, int *active, bool editMod
 
     // Update control
     //--------------------------------------------------------------------
-    GuiUpdateCapture();
-    if ((state != STATE_DISABLED) && (itemCount > 1) && !guiControlExclusiveMode)
+    GuiControlBegin(bounds, GUI_DRAG_NONE);
+    unsigned int dropdownId = guiCapture.currentId;
+    bool expanded = (guiCapture.dropdownOpenId == dropdownId);
+
+    if ((state != STATE_DISABLED) && (itemCount > 1))
     {
-        Vector2 mousePoint = GUI_POINTER_POSITION;
+        Vector2 mousePoint = GuiPointerPosition();
 
-        if (editMode)
+        if (expanded)
         {
-            // Dropdown is a modal popup: it owns the capture while expanded, even if the
-            // pointer is outside its bounds, so it can close on release without activating
-            // any control underneath
-            if (GuiCaptureSelf())
+            // Dropdown is modal while open: it owns the press even outside its bounds,
+            // so the underlying controls are not activated when it closes
+            guiCapture.dropdownOpenFrame = guiCapture.frameCounter;
+            GuiSetModal();
+            state = STATE_PRESSED;
+
+            // Check focused and selected item
+            for (int i = 0; i < itemCount; i++)
             {
-                state = STATE_PRESSED;
+                // Update item rectangle y position for next item
+                if (direction == 0) itemBounds.y += (bounds.height + GuiGetStyle(DROPDOWNBOX, DROPDOWN_ITEMS_SPACING));
+                else itemBounds.y -= (bounds.height + GuiGetStyle(DROPDOWNBOX, DROPDOWN_ITEMS_SPACING));
 
-                // Check if mouse has been released outside limits
-                if (!CheckScissorCollisionPointRec(mousePoint, boundsOpen))
+                if (CheckScissorCollisionPointRec(mousePoint, itemBounds))
                 {
-                    if (GUI_BUTTON_RELEASED) result = 1;
+                    itemFocused = i;
+                    break;
                 }
+            }
 
-                // Check if already selected item has been released again
-                if (CheckScissorCollisionPointRec(mousePoint, bounds) && GUI_BUTTON_RELEASED) result = 1;
+            itemBounds = bounds;
 
-                // Check focused and selected item
-                for (int i = 0; i < itemCount; i++)
-                {
-                    // Update item rectangle y position for next item
-                    if (direction == 0) itemBounds.y += (bounds.height + GuiGetStyle(DROPDOWNBOX, DROPDOWN_ITEMS_SPACING));
-                    else itemBounds.y -= (bounds.height + GuiGetStyle(DROPDOWNBOX, DROPDOWN_ITEMS_SPACING));
+            if (GuiIsPointerReleased())
+            {
+                if (itemFocused >= 0) itemSelected = itemFocused;
 
-                    if (CheckScissorCollisionPointRec(mousePoint, itemBounds))
-                    {
-                        itemFocused = i;
-                        if (GUI_BUTTON_RELEASED)
-                        {
-                            itemSelected = i;
-                            result = 1;         // Item selected
-                        }
-                        break;
-                    }
-                }
+                guiCapture.dropdownOpenId = 0;
+                expanded = false;
+                GuiClearModal();
 
-                itemBounds = bounds;
+                result = (itemSelected != prevActive)? GuiDiscreteResult(RESULT_CHANGED) : GuiDiscreteResult(RESULT_PRESSED);
             }
         }
         else
         {
-            if (CheckScissorCollisionPointRec(mousePoint, bounds) && GuiHitControl())
+            if (GuiHitControl() && GuiIsPointerReleased())
             {
-                if (GUI_BUTTON_RELEASED)
-                {
-                    result = 1;
-                    state = STATE_PRESSED;
-                }
-                else state = STATE_FOCUSED;
+                guiCapture.dropdownOpenId = dropdownId;
+                guiCapture.dropdownOpenFrame = guiCapture.frameCounter;
+                expanded = true;
+                GuiSetModal();
+
+                state = STATE_PRESSED;
+                result = GuiDiscreteResult(RESULT_PRESSED);
             }
+            else if (GuiIsHovered()) state = STATE_FOCUSED;
         }
     }
     //--------------------------------------------------------------------
 
     // Draw control
     //--------------------------------------------------------------------
-    if (editMode) GuiPanel(boundsOpen, NULL);
+    if (expanded) GuiPanel(boundsOpen, NULL);
 
     GuiDrawRectangle(bounds, GuiGetStyle(DROPDOWNBOX, BORDER_WIDTH), GetColor(GuiGetStyle(DROPDOWNBOX, BORDER + state*3)), GetColor(GuiGetStyle(DROPDOWNBOX, BASE + state*3)));
     GuiDrawText(items[itemSelected], GetTextBounds(DROPDOWNBOX, bounds), GuiGetStyle(DROPDOWNBOX, TEXT_ALIGNMENT), GetColor(GuiGetStyle(DROPDOWNBOX, TEXT + state*3)));
 
-    if (editMode)
+    if (expanded)
     {
         // Draw visible items
         for (int i = 0; i < itemCount; i++)
@@ -2788,8 +3156,8 @@ int GuiDropdownBox(Rectangle bounds, const char *text, int *active, bool editMod
 }
 
 // Text Box control
-// NOTE: Returns true on ENTER pressed (useful for data validation)
-int GuiTextBox(Rectangle bounds, char *text, int textSize, bool editMode)
+// NOTE: Returns true on commit (ENTER, ESCAPE or click outside); edit state is internal
+static int GuiTextBoxStyled(Rectangle bounds, char *text, int textSize, int styleControl, bool readOnly)
 {
     #if !defined(RAYGUI_TEXTBOX_AUTO_CURSOR_COOLDOWN)
         #define RAYGUI_TEXTBOX_AUTO_CURSOR_COOLDOWN  20        // Frames to wait for autocursor movement
@@ -2804,7 +3172,7 @@ int GuiTextBox(Rectangle bounds, char *text, int textSize, bool editMode)
     bool multiline = false;
     int wrapMode = GuiGetStyle(DEFAULT, TEXT_WRAP_MODE);
 
-    Rectangle textBounds = GetTextBounds(TEXTBOX, bounds);
+    Rectangle textBounds = GetTextBounds(styleControl, bounds);
     int textLength = (text != NULL)? (int)strlen(text) : 0; // Get current text length
     int thisCursorIndex = textBoxCursorIndex;
     if (thisCursorIndex > textLength) thisCursorIndex = textLength;
@@ -2820,8 +3188,8 @@ int GuiTextBox(Rectangle bounds, char *text, int textSize, bool editMode)
         (float)GuiGetStyle(DEFAULT, TEXT_SIZE)*2
     };
 
-    if (cursor.height >= bounds.height) cursor.height = bounds.height - GuiGetStyle(TEXTBOX, BORDER_WIDTH)*2;
-    if (cursor.y < (bounds.y + GuiGetStyle(TEXTBOX, BORDER_WIDTH))) cursor.y = bounds.y + GuiGetStyle(TEXTBOX, BORDER_WIDTH);
+    if (cursor.height >= bounds.height) cursor.height = bounds.height - GuiGetStyle(styleControl, BORDER_WIDTH)*2;
+    if (cursor.y < (bounds.y + GuiGetStyle(styleControl, BORDER_WIDTH))) cursor.y = bounds.y + GuiGetStyle(styleControl, BORDER_WIDTH);
 
     // Mouse cursor rectangle
     // NOTE: Initialized outside of screen
@@ -2836,20 +3204,49 @@ int GuiTextBox(Rectangle bounds, char *text, int textSize, bool editMode)
     // Update control
     //--------------------------------------------------------------------
     // WARNING: Text editing is only supported under certain conditions:
-    GuiUpdateCapture();
+    GuiControlBegin(bounds, GUI_DRAG_NONE);
+
+    bool hit = GuiHitTest(bounds);
+    bool editing = (guiCapture.editId == guiCapture.currentId) && (guiCapture.modalId == guiCapture.currentId);
+
+    // Commit marker set on an outside press is delivered on the release frame
+    if ((guiCapture.commitId == guiCapture.currentId) && GuiIsPointerReleased())
+    {
+        guiCapture.commitId = 0;
+        result = GuiDiscreteResult(RESULT_PRESSED);
+    }
+
+    // Press inside a non-editing text box starts editing and places the cursor at the end
+    if (!editing && hit && GuiIsPointerPressed() && !readOnly)
+    {
+        GuiBeginTextEdit(textLength);
+        autoCursorCounter = 0;
+        editing = true;
+    }
+
     if ((state != STATE_DISABLED) &&                // Control not disabled
-        !GuiGetStyle(TEXTBOX, TEXT_READONLY) &&     // TextBox not on read-only mode
-        !guiControlExclusiveMode &&                 // No gui slider on dragging
+        !readOnly &&     // TextBox not on read-only mode
         (wrapMode == TEXT_WRAP_NONE))               // No wrap mode
     {
-        Vector2 mousePosition = GUI_POINTER_POSITION;
+        Vector2 mousePosition = GuiPointerPosition();
 
-        if (editMode)
+        if (editing)
         {
-            bool hit = CheckScissorCollisionPointRec(mousePosition, bounds);
+            // An outside press exits edit mode and requests a commit on release
+            if (GuiIsPointerPressed() && !hit)
+            {
+                guiCapture.editId = 0;
+                guiCapture.commitId = guiCapture.currentId;
 
-            // Register capture candidate on press, only the captured control can edit
-            if (hit) GuiHitControl();
+                textBoxCursorIndex = 0;
+                autoCursorCounter = 0;
+                GuiClearModal();
+                editing = false;
+            }
+            else
+            {
+            GuiSetModal();
+            state = STATE_PRESSED;
 
             if (GuiCanInteract())
             {
@@ -3139,6 +3536,12 @@ int GuiTextBox(Rectangle bounds, char *text, int textSize, bool editMode)
             // Move cursor position with mouse
             if (CheckScissorCollisionPointRec(mousePosition, textBounds))
             {
+                // Account for the control text alignment when placing the editing cursor
+                int textAlign = GuiGetStyle(styleControl, TEXT_ALIGNMENT);
+                float textStartX = textBounds.x;
+                if (textAlign == TEXT_ALIGN_CENTER) textStartX += (textBounds.width - (float)GuiGetTextWidth(text + textIndexOffset))/2;
+                else if (textAlign == TEXT_ALIGN_RIGHT) textStartX += textBounds.width - (float)GuiGetTextWidth(text + textIndexOffset);
+
                 float scaleFactor = (float)GuiGetStyle(DEFAULT, TEXT_SIZE)/(float)guiFont.baseSize;
                 int codepointIndex = 0;
                 float glyphWidth = 0.0f;
@@ -3153,9 +3556,9 @@ int GuiTextBox(Rectangle bounds, char *text, int textSize, bool editMode)
                     if (guiFont.glyphs[codepointIndex].advanceX == 0) glyphWidth = ((float)guiFont.recs[codepointIndex].width*scaleFactor);
                     else glyphWidth = ((float)guiFont.glyphs[codepointIndex].advanceX*scaleFactor);
 
-                    if (mousePosition.x <= (textBounds.x + (widthToMouseX + glyphWidth/2)))
+                    if (mousePosition.x <= (textStartX + (widthToMouseX + glyphWidth/2)))
                     {
-                        mouseCursor.x = textBounds.x + widthToMouseX;
+                        mouseCursor.x = textStartX + widthToMouseX;
                         mouseCursorIndex = i;
                         break;
                     }
@@ -3165,14 +3568,14 @@ int GuiTextBox(Rectangle bounds, char *text, int textSize, bool editMode)
 
                 // Check if mouse cursor is at the last position
                 int textEndWidth = GuiGetTextWidth(text + textIndexOffset);
-                if (GUI_POINTER_POSITION.x >= (textBounds.x + textEndWidth - glyphWidth/2))
+                if (mousePosition.x >= (textStartX + textEndWidth - glyphWidth/2))
                 {
-                    mouseCursor.x = textBounds.x + textEndWidth;
+                    mouseCursor.x = textStartX + textEndWidth;
                     mouseCursorIndex = textLength;
                 }
 
                 // Place cursor at required index on mouse click
-                if ((mouseCursor.x >= 0) && GUI_BUTTON_RELEASED)
+                if ((mouseCursor.x >= 0) && GuiIsPointerReleased())
                 {
                     cursor.x = mouseCursor.x;
                     textBoxCursorIndex = mouseCursorIndex;
@@ -3181,43 +3584,34 @@ int GuiTextBox(Rectangle bounds, char *text, int textSize, bool editMode)
             else mouseCursor.x = -1;
 
             // Recalculate cursor position.y depending on textBoxCursorIndex
-            cursor.x = bounds.x + GuiGetStyle(TEXTBOX, TEXT_PADDING) + GuiGetTextWidth(text + textIndexOffset) - GuiGetTextWidth(text + textBoxCursorIndex) + GuiGetStyle(DEFAULT, TEXT_SPACING);
+            {
+                int textAlign = GuiGetStyle(styleControl, TEXT_ALIGNMENT);
+                float textStartX = textBounds.x;
+                if (textAlign == TEXT_ALIGN_CENTER) textStartX += (textBounds.width - (float)GuiGetTextWidth(text + textIndexOffset))/2;
+                else if (textAlign == TEXT_ALIGN_RIGHT) textStartX += textBounds.width - (float)GuiGetTextWidth(text + textIndexOffset);
+
+                cursor.x = textStartX + GuiGetTextWidth(text + textIndexOffset) - GuiGetTextWidth(text + textBoxCursorIndex) + GuiGetStyle(DEFAULT, TEXT_SPACING);
+            }
             //if (multiline) cursor.y = GetTextLines()
 
-            // Finish text editing on ENTER or mouse click outside bounds
-            if ((!multiline && GUI_KEY_PRESSED(KEY_ENTER)) ||
-                (!CheckScissorCollisionPointRec(mousePosition, bounds) && GUI_BUTTON_RELEASED))
+            // Commit on ENTER (single line) or ESCAPE
+            if ((!multiline && GUI_KEY_PRESSED(KEY_ENTER)) || GUI_KEY_PRESSED(KEY_ESCAPE))
             {
                 textBoxCursorIndex = 0;     // GLOBAL: Reset the shared cursor index
                 autoCursorCounter = 0;      // GLOBAL: Reset counter for repeated keystrokes
 
-                //*editMode = false;
-                result = RESULT_PRESSED;
+                guiCapture.editId = 0;
+                GuiClearModal();
+                editing = false;
+
+                result = GuiDiscreteResult(RESULT_PRESSED);
             }
             } // if (GuiCanInteract())
-            else if (!hit && !guiLocked && GUI_BUTTON_RELEASED && (captureGuiId != curGuiId))
-            {
-                // Click outside while editing: request edit exit on release
-                textBoxCursorIndex = 0;
-                autoCursorCounter = 0;
-                result = RESULT_PRESSED;
-            }
+            } // else (editing, not outside press)
         }
         else
         {
-            if (CheckScissorCollisionPointRec(mousePosition, bounds) && GuiHitControl())
-            {
-                state = STATE_FOCUSED;
-
-                if (GUI_BUTTON_RELEASED)
-                {
-                    textBoxCursorIndex = textLength;   // GLOBAL: Place cursor index to the end of current text
-                    autoCursorCounter = 0;             // GLOBAL: Reset counter for repeated keystrokes
-
-                    //*editMode = true;
-                    result = RESULT_PRESSED;
-                }
-            }
+            if (!editing && GuiIsHovered()) state = STATE_FOCUSED;
         }
     }
     //--------------------------------------------------------------------
@@ -3226,26 +3620,26 @@ int GuiTextBox(Rectangle bounds, char *text, int textSize, bool editMode)
     //--------------------------------------------------------------------
     if (state == STATE_PRESSED)
     {
-        GuiDrawRectangle(bounds, GuiGetStyle(TEXTBOX, BORDER_WIDTH), GetColor(GuiGetStyle(TEXTBOX, BORDER + (state*3))), GetColor(GuiGetStyle(TEXTBOX, BASE_COLOR_PRESSED)));
+        GuiDrawRectangle(bounds, GuiGetStyle(styleControl, BORDER_WIDTH), GetColor(GuiGetStyle(styleControl, BORDER + (state*3))), GetColor(GuiGetStyle(styleControl, BASE_COLOR_PRESSED)));
     }
     else if (state == STATE_DISABLED)
     {
-        GuiDrawRectangle(bounds, GuiGetStyle(TEXTBOX, BORDER_WIDTH), GetColor(GuiGetStyle(TEXTBOX, BORDER + (state*3))), GetColor(GuiGetStyle(TEXTBOX, BASE_COLOR_DISABLED)));
+        GuiDrawRectangle(bounds, GuiGetStyle(styleControl, BORDER_WIDTH), GetColor(GuiGetStyle(styleControl, BORDER + (state*3))), GetColor(GuiGetStyle(styleControl, BASE_COLOR_DISABLED)));
     }
-    else GuiDrawRectangle(bounds, GuiGetStyle(TEXTBOX, BORDER_WIDTH), GetColor(GuiGetStyle(TEXTBOX, BORDER + (state*3))), BLANK);
+    else GuiDrawRectangle(bounds, GuiGetStyle(styleControl, BORDER_WIDTH), GetColor(GuiGetStyle(styleControl, BORDER + (state*3))), BLANK);
 
     // Draw text considering index offset if required
     // NOTE: Text index offset depends on cursor position
-    GuiDrawText(text + textIndexOffset, textBounds, GuiGetStyle(TEXTBOX, TEXT_ALIGNMENT), GetColor(GuiGetStyle(TEXTBOX, TEXT + (state*3))));
+    GuiDrawText(text + textIndexOffset, textBounds, GuiGetStyle(styleControl, TEXT_ALIGNMENT), GetColor(GuiGetStyle(styleControl, TEXT + (state*3))));
 
     // Draw cursor
-    if (editMode && !GuiGetStyle(TEXTBOX, TEXT_READONLY))
+    if (editing && !readOnly)
     {
         //if (autoCursorMode || ((blinkCursorFrameCounter/40)%2 == 0))
-        GuiDrawRectangle(cursor, 0, BLANK, GetColor(GuiGetStyle(TEXTBOX, BORDER_COLOR_PRESSED)));
+        GuiDrawRectangle(cursor, 0, BLANK, GetColor(GuiGetStyle(styleControl, BORDER_COLOR_PRESSED)));
 
         // Draw mouse position cursor (if required)
-        if (mouseCursor.x >= 0) GuiDrawRectangle(mouseCursor, 0, BLANK, GetColor(GuiGetStyle(TEXTBOX, BORDER_COLOR_PRESSED)));
+        if (mouseCursor.x >= 0) GuiDrawRectangle(mouseCursor, 0, BLANK, GetColor(GuiGetStyle(styleControl, BORDER_COLOR_PRESSED)));
     }
     else if (state == STATE_FOCUSED) GuiTooltip(bounds);
     //--------------------------------------------------------------------
@@ -3253,10 +3647,17 @@ int GuiTextBox(Rectangle bounds, char *text, int textSize, bool editMode)
     return result;
 }
 
+
+// Text Box control
+int GuiTextBox(Rectangle bounds, char *text, int textSize)
+{
+    return GuiTextBoxStyled(bounds, text, textSize, TEXTBOX, GuiGetStyle(TEXTBOX, TEXT_READONLY) != 0);
+}
+
 /*
 // Text Box control with multiple lines and word-wrap
 // NOTE: This text-box is readonly, no editing supported by default
-bool GuiTextBoxMulti(Rectangle bounds, char *text, int textSize, bool editMode)
+bool GuiTextBoxMulti(Rectangle bounds, char *text, int textSize)
 {
     bool pressed = false;
 
@@ -3265,7 +3666,7 @@ bool GuiTextBoxMulti(Rectangle bounds, char *text, int textSize, bool editMode)
     GuiSetStyle(DEFAULT, TEXT_ALIGNMENT_VERTICAL, TEXT_ALIGN_TOP);
 
     // TODO: Implement methods to calculate cursor position properly
-    pressed = GuiTextBox(bounds, text, textSize, editMode);
+    pressed = GuiTextBox(bounds, text, textSize);
 
     GuiSetStyle(DEFAULT, TEXT_ALIGNMENT_VERTICAL, TEXT_ALIGN_MIDDLE);
     GuiSetStyle(DEFAULT, TEXT_WRAP_MODE, TEXT_WRAP_NONE);
@@ -3276,9 +3677,9 @@ bool GuiTextBoxMulti(Rectangle bounds, char *text, int textSize, bool editMode)
 */
 
 // Spinner control, returns selected value
-int GuiSpinner(Rectangle bounds, const char *text, int *value, int minValue, int maxValue, bool editMode)
+int GuiSpinner(Rectangle bounds, const char *text, int *value, int minValue, int maxValue)
 {
-    int result = 1;
+    int result = RESULT_NONE;
     GuiState state = guiState;
 
     int tempValue = *value;
@@ -3303,19 +3704,8 @@ int GuiSpinner(Rectangle bounds, const char *text, int *value, int minValue, int
 
     // Update control
     //--------------------------------------------------------------------
-    GuiUpdateCapture();
-    if ((state != STATE_DISABLED) && !guiControlExclusiveMode)
-    {
-        Vector2 mousePoint = GUI_POINTER_POSITION;
-
-        // Check spinner state
-        if (CheckScissorCollisionPointRec(mousePoint, bounds) && GuiHitControl())
-        {
-            if (GUI_BUTTON_DOWN) state = STATE_PRESSED;
-            else state = STATE_FOCUSED;
-        }
-    }
-
+    // NOTE: The spinner is only a layout helper: the arrow buttons and the internal value
+    // box are the actual controls and own their capture ids independently
 #if defined(RAYGUI_NO_ICONS)
     if (GuiButton(leftButtonBound, "<")) tempValue--;
     if (GuiButton(rightButtonBound, ">")) tempValue++;
@@ -3323,17 +3713,11 @@ int GuiSpinner(Rectangle bounds, const char *text, int *value, int minValue, int
     if (GuiButton(leftButtonBound, GuiIconText(ICON_ARROW_LEFT_FILL, NULL))) tempValue--;
     if (GuiButton(rightButtonBound, GuiIconText(ICON_ARROW_RIGHT_FILL, NULL))) tempValue++;
 #endif
-
-    if (!editMode)
-    {
-        if (tempValue < minValue) tempValue = minValue;
-        if (tempValue > maxValue) tempValue = maxValue;
-    }
     //--------------------------------------------------------------------
 
     // Draw control
     //--------------------------------------------------------------------
-    result = GuiValueBox(valueBoxBounds, NULL, &tempValue, minValue, maxValue, editMode);
+    result = GuiValueBox(valueBoxBounds, NULL, &tempValue, minValue, maxValue);
 
     // Draw value selector custom buttons
     // NOTE: BORDER_WIDTH and TEXT_ALIGNMENT forced values
@@ -3357,18 +3741,11 @@ int GuiSpinner(Rectangle bounds, const char *text, int *value, int minValue, int
 }
 
 // Value Box control, updates input text with numbers
-int GuiValueBox(Rectangle bounds, const char *text, int *value, int minValue, int maxValue, bool editMode)
+// NOTE: Editing is handled by an internal GuiTextBox; the text is parsed only on commit
+int GuiValueBox(Rectangle bounds, const char *text, int *value, int minValue, int maxValue)
 {
-    #if !defined(RAYGUI_VALUEBOX_MAX_CHARS)
-        #define RAYGUI_VALUEBOX_MAX_CHARS  32
-    #endif
-
     int result = RESULT_NONE;
     GuiState state = guiState;
-
-    //int prevValue = *value;
-    char textValue[RAYGUI_VALUEBOX_MAX_CHARS + 1] = { 0 };
-    snprintf(textValue, RAYGUI_VALUEBOX_MAX_CHARS + 1, "%i", *value);
 
     Rectangle textBounds = { 0 };
     if (text != NULL)
@@ -3380,292 +3757,110 @@ int GuiValueBox(Rectangle bounds, const char *text, int *value, int minValue, in
         if (GuiGetStyle(VALUEBOX, TEXT_ALIGNMENT) == TEXT_ALIGN_LEFT) textBounds.x = bounds.x - textBounds.width - GuiGetStyle(VALUEBOX, TEXT_PADDING);
     }
 
-    // Update control
-    //--------------------------------------------------------------------
-    GuiUpdateCapture();
-    if ((state != STATE_DISABLED) && !guiControlExclusiveMode)
+    // The ValueBox owns the id; the internal TextBox reuses it through a scope
+    GuiControlBegin(bounds, GUI_DRAG_NONE);
+    unsigned int id = guiCapture.currentId;
+
+    GuiValueBoxBuffer *buffer = GuiGetValueBoxBuffer(id);
+    char localText[RAYGUI_VALUEBOX_MAX_CHARS + 1] = { 0 };
+    char *valueText = (buffer != NULL)? buffer->text : localText;
+
+    bool editing = (guiCapture.editId == id);
+    bool pendingCommit = (guiCapture.commitId == id);
+
+    // While editing (or waiting to deliver a commit) keep the user text; otherwise mirror the value
+    if (!editing && !pendingCommit)
     {
-        Vector2 mousePoint = GUI_POINTER_POSITION;
-        bool valueHasChanged = false;
-        bool hit = CheckScissorCollisionPointRec(mousePoint, bounds);
+        if (*value > maxValue) *value = maxValue;
+        else if (*value < minValue) *value = minValue;
 
-        if (editMode)
+        snprintf(valueText, RAYGUI_VALUEBOX_MAX_CHARS + 1, "%i", *value);
+    }
+
+    int prevAlignment = GuiGetStyle(VALUEBOX, TEXT_ALIGNMENT);
+    GuiSetStyle(VALUEBOX, TEXT_ALIGNMENT, TEXT_ALIGN_CENTER);
+
+    guiCapture.scopeId = id;
+    guiCapture.scopeDepth++;
+    result = GuiTextBoxStyled(bounds, valueText, RAYGUI_VALUEBOX_MAX_CHARS, VALUEBOX, false);
+    guiCapture.scopeDepth--;
+
+    GuiSetStyle(VALUEBOX, TEXT_ALIGNMENT, prevAlignment);
+
+    // Parse only on commit; invalid text keeps the previous value
+    if (result == RESULT_PRESSED)
+    {
+        char *end = NULL;
+        long parsed = strtol(valueText, &end, 10);
+
+        if (end != valueText)
         {
-            // Register capture candidate on press, only the captured control can edit
-            if (hit) GuiHitControl();
-
-            if (GuiCanInteract())
-            {
-            state = STATE_PRESSED;
-
-            int keyCount = (int)strlen(textValue);
-
-            // Add or remove minus symbol
-            if (GUI_KEY_PRESSED(KEY_MINUS))
-            {
-                if (textValue[0] == '-')
-                {
-                    for (int i = 0 ; i < keyCount; i++) textValue[i] = textValue[i + 1];
-
-                    keyCount--;
-                    valueHasChanged = true;
-                }
-                else if (keyCount < RAYGUI_VALUEBOX_MAX_CHARS)
-                {
-                    if (keyCount == 0)
-                    {
-                        textValue[0] = '0';
-                        textValue[1] = '\0';
-                        keyCount++;
-                    }
-
-                    for (int i = keyCount ; i > -1; i--) textValue[i + 1] = textValue[i];
-
-                    textValue[0] = '-';
-                    keyCount++;
-                    valueHasChanged = true;
-                }
-            }
-
-            // Add new digit to text value
-            if ((keyCount >= 0) && (keyCount < RAYGUI_VALUEBOX_MAX_CHARS) && (GuiGetTextWidth(textValue) < bounds.width))
-            {
-                int key = GUI_INPUT_KEY;
-
-                // Only allow keys in range [48..57]
-                if ((key >= 48) && (key <= 57))
-                {
-                    textValue[keyCount] = (char)key;
-                    keyCount++;
-                    valueHasChanged = true;
-                }
-            }
-
-            // Delete text
-            if ((keyCount > 0) && GUI_KEY_PRESSED(KEY_BACKSPACE))
-            {
-                keyCount--;
-                textValue[keyCount] = '\0';
-                valueHasChanged = true;
-            }
-
-            if (valueHasChanged) *value = TextToInteger(textValue);
-
-            // NOTE: Values are not clamped until user input finishes
-            //if (*value > maxValue) *value = maxValue;
-            //else if (*value < minValue) *value = minValue;
-
-            if ((GUI_KEY_PRESSED(KEY_ENTER) || GUI_KEY_PRESSED(KEY_KP_ENTER)) || (!CheckScissorCollisionPointRec(mousePoint, bounds) && GUI_BUTTON_RELEASED))
-            {
-                if (*value > maxValue) *value = maxValue;
-                else if (*value < minValue) *value = minValue;
-
-                result = RESULT_PRESSED;
-            }
-            } // if (GuiCanInteract())
-            else if (!hit && !guiLocked && GUI_BUTTON_RELEASED && (captureGuiId != curGuiId))
-            {
-                // Click outside while editing: request edit exit on release
-                if (*value > maxValue) *value = maxValue;
-                else if (*value < minValue) *value = minValue;
-
-                result = RESULT_PRESSED;
-            }
-        }
-        else
-        {
+            *value = (int)parsed;
             if (*value > maxValue) *value = maxValue;
             else if (*value < minValue) *value = minValue;
-
-            if (CheckScissorCollisionPointRec(mousePoint, bounds) && GuiHitControl())
-            {
-                state = STATE_FOCUSED;
-
-                if (GUI_BUTTON_RELEASED) result = RESULT_PRESSED;
-            }
         }
-    }
-
-    //if (prevValue != *value) result = RESULT_CHANGED;
-    //--------------------------------------------------------------------
-
-    // Draw control
-    //--------------------------------------------------------------------
-    Color baseColor = BLANK;
-    if (state == STATE_PRESSED) baseColor = GetColor(GuiGetStyle(VALUEBOX, BASE_COLOR_PRESSED));
-    else if (state == STATE_DISABLED) baseColor = GetColor(GuiGetStyle(VALUEBOX, BASE_COLOR_DISABLED));
-
-    GuiDrawRectangle(bounds, GuiGetStyle(VALUEBOX, BORDER_WIDTH), GetColor(GuiGetStyle(VALUEBOX, BORDER + (state*3))), baseColor);
-    GuiDrawText(textValue, GetTextBounds(VALUEBOX, bounds), TEXT_ALIGN_CENTER, GetColor(GuiGetStyle(VALUEBOX, TEXT + (state*3))));
-
-    // Draw cursor rectangle
-    if (editMode)
-    {
-        // NOTE: ValueBox internal text is always centered
-        Rectangle cursor = { bounds.x + GuiGetTextWidth(textValue)/2 + bounds.width/2 + 1,
-            bounds.y + GuiGetStyle(TEXTBOX, BORDER_WIDTH) + 2,
-            2, bounds.height - GuiGetStyle(TEXTBOX, BORDER_WIDTH)*2 - 4 };
-        if (cursor.height > bounds.height) cursor.height = bounds.height - GuiGetStyle(TEXTBOX, BORDER_WIDTH)*2;
-        GuiDrawRectangle(cursor, 0, BLANK, GetColor(GuiGetStyle(VALUEBOX, BORDER_COLOR_PRESSED)));
     }
 
     // Draw text label if provided
-    GuiDrawText(text, textBounds, (GuiGetStyle(VALUEBOX, TEXT_ALIGNMENT) == TEXT_ALIGN_RIGHT)? TEXT_ALIGN_LEFT : TEXT_ALIGN_RIGHT, GetColor(GuiGetStyle(LABEL, TEXT + (state*3))));
-    //--------------------------------------------------------------------
+    if (guiCapture.editId == id) state = STATE_PRESSED;
+    else if (GuiIsHovered()) state = STATE_FOCUSED;
 
-    return result;
-}
-
-// Floating point Value Box control, updates input val_str with numbers
-int GuiValueBoxFloat(Rectangle bounds, const char *text, char *textValue, float *value, bool editMode)
-{
-    #if !defined(RAYGUI_VALUEBOX_MAX_CHARS)
-        #define RAYGUI_VALUEBOX_MAX_CHARS  32
-    #endif
-
-    int result = RESULT_NONE;
-    GuiState state = guiState;
-
-    //float prevValue = *value;
-
-    Rectangle textBounds = { 0 };
-    if (text != NULL)
-    {
-        textBounds.width = (float)GuiGetTextWidth(text) + 2;
-        textBounds.height = (float)GuiGetStyle(DEFAULT, TEXT_SIZE);
-        textBounds.x = bounds.x + bounds.width + GuiGetStyle(VALUEBOX, TEXT_PADDING);
-        textBounds.y = bounds.y + bounds.height/2 - GuiGetStyle(DEFAULT, TEXT_SIZE)/2;
-        if (GuiGetStyle(VALUEBOX, TEXT_ALIGNMENT) == TEXT_ALIGN_LEFT) textBounds.x = bounds.x - textBounds.width - GuiGetStyle(VALUEBOX, TEXT_PADDING);
-    }
-
-    // Update control
-    //--------------------------------------------------------------------
-    GuiUpdateCapture();
-    if ((state != STATE_DISABLED) && !guiControlExclusiveMode)
-    {
-        Vector2 mousePoint = GUI_POINTER_POSITION;
-        bool valueHasChanged = false;
-        bool hit = CheckScissorCollisionPointRec(mousePoint, bounds);
-
-        if (editMode)
-        {
-            // Register capture candidate on press, only the captured control can edit
-            if (hit) GuiHitControl();
-
-            if (GuiCanInteract())
-            {
-            state = STATE_PRESSED;
-
-            int keyCount = (int)strlen(textValue);
-
-            // Add or remove minus symbol
-            if (GUI_KEY_PRESSED(KEY_MINUS))
-            {
-                if (textValue[0] == '-')
-                {
-                    for (int i = 0; i < keyCount; i++) textValue[i] = textValue[i + 1];
-
-                    keyCount--;
-                    valueHasChanged = true;
-                }
-                else if (keyCount < (RAYGUI_VALUEBOX_MAX_CHARS - 1))
-                {
-                    if (keyCount == 0)
-                    {
-                        textValue[0] = '0';
-                        textValue[1] = '\0';
-                        keyCount++;
-                    }
-
-                    for (int i = keyCount; i > -1; i--) textValue[i + 1] = textValue[i];
-
-                    textValue[0] = '-';
-                    keyCount++;
-                    valueHasChanged = true;
-                }
-            }
-
-            // Only allow keys in range [48..57]
-            if (keyCount < RAYGUI_VALUEBOX_MAX_CHARS)
-            {
-                if (GuiGetTextWidth(textValue) < bounds.width)
-                {
-                    int key = GUI_INPUT_KEY;
-                    if (((key >= 48) && (key <= 57)) ||
-                        (key == '.') ||
-                        ((keyCount == 0) && (key == '+')) ||  // NOTE: Sign can only be in first position
-                        ((keyCount == 0) && (key == '-')))
-                    {
-                        textValue[keyCount] = (char)key;
-                        keyCount++;
-
-                        valueHasChanged = true;
-                    }
-                }
-            }
-
-            // Pressed backspace
-            if (GUI_KEY_PRESSED(KEY_BACKSPACE))
-            {
-                if (keyCount > 0)
-                {
-                    keyCount--;
-                    textValue[keyCount] = '\0';
-                    valueHasChanged = true;
-                }
-            }
-
-            if (valueHasChanged) *value = TextToFloat(textValue);
-
-            if ((GUI_KEY_PRESSED(KEY_ENTER) || GUI_KEY_PRESSED(KEY_KP_ENTER)) ||
-                (!CheckScissorCollisionPointRec(mousePoint, bounds) && GUI_BUTTON_RELEASED)) result = RESULT_PRESSED;
-            } // if (GuiCanInteract())
-            else if (!hit && !guiLocked && GUI_BUTTON_RELEASED && (captureGuiId != curGuiId))
-            {
-                // Click outside while editing: request edit exit on release
-                result = RESULT_PRESSED;
-            }
-        }
-        else
-        {
-            if (CheckScissorCollisionPointRec(mousePoint, bounds) && GuiHitControl())
-            {
-                state = STATE_FOCUSED;
-
-                if (GUI_BUTTON_RELEASED) result = RESULT_PRESSED;
-            }
-        }
-    }
-
-    //if (prevValue != *value) result = RESULT_CHANGED;
-    //--------------------------------------------------------------------
-
-    // Draw control
-    //--------------------------------------------------------------------
-    Color baseColor = BLANK;
-    if (state == STATE_PRESSED) baseColor = GetColor(GuiGetStyle(VALUEBOX, BASE_COLOR_PRESSED));
-    else if (state == STATE_DISABLED) baseColor = GetColor(GuiGetStyle(VALUEBOX, BASE_COLOR_DISABLED));
-
-    GuiDrawRectangle(bounds, GuiGetStyle(VALUEBOX, BORDER_WIDTH), GetColor(GuiGetStyle(VALUEBOX, BORDER + (state*3))), baseColor);
-    GuiDrawText(textValue, GetTextBounds(VALUEBOX, bounds), TEXT_ALIGN_CENTER, GetColor(GuiGetStyle(VALUEBOX, TEXT + (state*3))));
-
-    // Draw cursor
-    if (editMode)
-    {
-        // NOTE: ValueBox internal text is always centered
-        Rectangle cursor = {bounds.x + GuiGetTextWidth(textValue)/2 + bounds.width/2 + 1,
-                            bounds.y + 2*GuiGetStyle(VALUEBOX, BORDER_WIDTH), 4,
-                            bounds.height - 4*GuiGetStyle(VALUEBOX, BORDER_WIDTH)};
-        GuiDrawRectangle(cursor, 0, BLANK, GetColor(GuiGetStyle(VALUEBOX, BORDER_COLOR_PRESSED)));
-    }
-
-    // Draw text label if provided
     GuiDrawText(text, textBounds, (GuiGetStyle(VALUEBOX, TEXT_ALIGNMENT) == TEXT_ALIGN_RIGHT)? TEXT_ALIGN_LEFT : TEXT_ALIGN_RIGHT,
                 GetColor(GuiGetStyle(LABEL, TEXT + (state*3))));
     //--------------------------------------------------------------------
 
     return result;
 }
+
+// Floating point Value Box control, updates input value with numbers
+// NOTE: Editing is handled by an internal GuiTextBox; the text is parsed only on commit
+int GuiValueBoxFloat(Rectangle bounds, const char *text, char *textValue, float *value)
+{
+    int result = RESULT_NONE;
+    GuiState state = guiState;
+
+    Rectangle textBounds = { 0 };
+    if (text != NULL)
+    {
+        textBounds.width = (float)GuiGetTextWidth(text) + 2;
+        textBounds.height = (float)GuiGetStyle(DEFAULT, TEXT_SIZE);
+        textBounds.x = bounds.x + bounds.width + GuiGetStyle(VALUEBOX, TEXT_PADDING);
+        textBounds.y = bounds.y + bounds.height/2 - GuiGetStyle(DEFAULT, TEXT_SIZE)/2;
+        if (GuiGetStyle(VALUEBOX, TEXT_ALIGNMENT) == TEXT_ALIGN_LEFT) textBounds.x = bounds.x - textBounds.width - GuiGetStyle(VALUEBOX, TEXT_PADDING);
+    }
+
+    GuiControlBegin(bounds, GUI_DRAG_NONE);
+    unsigned int id = guiCapture.currentId;
+
+    int prevAlignment = GuiGetStyle(VALUEBOX, TEXT_ALIGNMENT);
+    GuiSetStyle(VALUEBOX, TEXT_ALIGNMENT, TEXT_ALIGN_CENTER);
+
+    guiCapture.scopeId = id;
+    guiCapture.scopeDepth++;
+    result = GuiTextBoxStyled(bounds, textValue, RAYGUI_VALUEBOX_MAX_CHARS, VALUEBOX, false);
+    guiCapture.scopeDepth--;
+
+    GuiSetStyle(VALUEBOX, TEXT_ALIGNMENT, prevAlignment);
+
+    // Parse only on commit; invalid text keeps the previous value
+    if (result == RESULT_PRESSED)
+    {
+        char *end = NULL;
+        float parsed = strtof(textValue, &end);
+        if (end != textValue) *value = parsed;
+    }
+
+    // Draw text label if provided
+    if (guiCapture.editId == id) state = STATE_PRESSED;
+    else if (GuiIsHovered()) state = STATE_FOCUSED;
+
+    GuiDrawText(text, textBounds, (GuiGetStyle(VALUEBOX, TEXT_ALIGNMENT) == TEXT_ALIGN_RIGHT)? TEXT_ALIGN_LEFT : TEXT_ALIGN_RIGHT,
+                GetColor(GuiGetStyle(LABEL, TEXT + (state*3))));
+    //--------------------------------------------------------------------
+
+    return result;
+}
+
 
 // Slider control with pro parameters
 // NOTE: Other GuiSlider*() controls use this one
@@ -3686,56 +3881,32 @@ int GuiSlider(Rectangle bounds, const char *textLeft, const char *textRight, flo
 
     // Update control
     //--------------------------------------------------------------------
-    GuiUpdateCapture();
+    GuiControlBegin(bounds, GUI_DRAG_HORIZONTAL);
     if (state != STATE_DISABLED)
     {
-        Vector2 mousePoint = GUI_POINTER_POSITION;
+        Vector2 mousePoint = GuiPointerPosition();
+        bool captured = GuiIsCapturedControl();
 
-        if (guiControlExclusiveMode) // Allows to keep dragging outside of bounds
+        if (captured && GuiIsPointerDown() && guiCapture.didDrag)
         {
-            if (!GUI_BUTTON_DOWN)
-            {
-                guiControlExclusiveMode = false;
-                guiControlExclusiveRec = RAYGUI_CLITERAL(Rectangle){ 0, 0, 0, 0 };
-            }
-            else if (GuiCanInteract())
-            {
-                if (CHECK_BOUNDS_ID(bounds, guiControlExclusiveRec))
-                {
-                    state = STATE_PRESSED;
-                    // Get equivalent value and slider position from mousePosition.x
-                    *value = (maxValue - minValue)*((mousePoint.x - bounds.x - sliderWidth/2)/(bounds.width - sliderWidth)) + minValue;
-                }
-            }
+            // Dragging: keep updating even if the pointer leaves the bounds
+            state = STATE_PRESSED;
+            *value = (maxValue - minValue)*((mousePoint.x - bounds.x - sliderWidth/2)/(bounds.width - sliderWidth)) + minValue;
         }
-        else if (CheckScissorCollisionPointRec(mousePoint, bounds) && GuiHitControl())
+        else if (captured && GuiIsPointerReleased())
         {
-            if (GUI_BUTTON_DOWN)
+            // Quick click: no held frame, apply the click position on release
+            if (!guiCapture.didDrag && !GuiHitTest(slider))
             {
-                state = STATE_PRESSED;
-                guiControlExclusiveMode = true;
-                guiControlExclusiveRec = bounds; // Store bounds as an identifier when dragging starts
-
-                if (!CheckScissorCollisionPointRec(mousePoint, slider))
-                {
-                    // Get equivalent value and slider position from mousePosition.x
-                    *value = (maxValue - minValue)*((mousePoint.x - bounds.x - sliderWidth/2)/(bounds.width - sliderWidth)) + minValue;
-                }
+                *value = (maxValue - minValue)*((mousePoint.x - bounds.x - sliderWidth/2)/(bounds.width - sliderWidth)) + minValue;
             }
-            else if (GUI_BUTTON_RELEASED)
-            {
-                // Quick click: no held frame, apply the click position on release
-                if (!CheckScissorCollisionPointRec(mousePoint, slider))
-                {
-                    *value = (maxValue - minValue)*((mousePoint.x - bounds.x - sliderWidth/2)/(bounds.width - sliderWidth)) + minValue;
-                }
 
-                state = STATE_FOCUSED;
-            }
-            else state = STATE_FOCUSED;
+            state = STATE_FOCUSED;
         }
+        else if (captured) state = STATE_PRESSED;
+        else if (GuiIsHovered()) state = STATE_FOCUSED;
 
-        if (GuiCanInteract())
+        if (captured)
         {
             if (*value > maxValue) *value = maxValue;
             else if (*value < minValue) *value = minValue;
@@ -3908,18 +4079,13 @@ int GuiStatusBar(Rectangle bounds, const char *text)
 
     // Update control
     //--------------------------------------------------------------------
-    GuiUpdateCapture();
-    if ((state != STATE_DISABLED) && !guiControlExclusiveMode)
+    GuiControlBegin(bounds, GUI_DRAG_NONE);
+    if (state != STATE_DISABLED)
     {
-        Vector2 mousePoint = GUI_POINTER_POSITION;
-
-        // Check checkbox state
-        if (CheckScissorCollisionPointRec(mousePoint, bounds) && GuiHitControl())
+        // Check status bar state
+        if (GuiHitControl())
         {
-            //if (GUI_BUTTON_DOWN) state = STATE_PRESSED;
-            //else state = STATE_FOCUSED;
-
-            if (GUI_BUTTON_RELEASED) result = RESULT_PRESSED;
+            if (GuiIsPointerReleased()) result = GuiDiscreteResult(RESULT_PRESSED);
         }
     }
     //--------------------------------------------------------------------
@@ -3941,18 +4107,16 @@ int GuiDummyRec(Rectangle bounds, const char *text)
 
     // Update control
     //--------------------------------------------------------------------
-    GuiUpdateCapture();
-    if ((state != STATE_DISABLED) && !guiControlExclusiveMode)
+    GuiControlBegin(bounds, GUI_DRAG_NONE);
+    if (state != STATE_DISABLED)
     {
-        Vector2 mousePoint = GUI_POINTER_POSITION;
-
         // Check button state
-        if (CheckScissorCollisionPointRec(mousePoint, bounds) && GuiHitControl())
+        if (GuiHitControl())
         {
-            if (GUI_BUTTON_DOWN) state = STATE_PRESSED;
+            if (GuiIsPointerDown()) state = STATE_PRESSED;
             else state = STATE_FOCUSED;
 
-            if (GUI_BUTTON_RELEASED) result = RESULT_PRESSED;
+            if (GuiIsPointerReleased()) result = GuiDiscreteResult(RESULT_PRESSED);
         }
     }
     //--------------------------------------------------------------------
@@ -4012,50 +4176,47 @@ int GuiListViewEx(Rectangle bounds, char **text, int count, int *scrollIndex, in
 
     // Update control
     //--------------------------------------------------------------------
-    GuiUpdateCapture();
-    if ((state != STATE_DISABLED) && !guiControlExclusiveMode)
+    GuiControlBegin(bounds, GUI_DRAG_NONE);
+    if (state != STATE_DISABLED)
     {
-        Vector2 mousePoint = GUI_POINTER_POSITION;
+        Vector2 mousePoint = GuiPointerPosition();
 
-        // Check mouse inside list view
-        if (CheckScissorCollisionPointRec(mousePoint, bounds))
+        if (!GuiHitTest(bounds)) itemFocused = -1;
+
+        if (GuiHitControl())
         {
-            if (GuiHitControl())
+            state = STATE_FOCUSED;
+
+            // Check focused and selected item
+            for (int i = 0; i < visibleItems; i++)
             {
-                state = STATE_FOCUSED;
-
-                // Check focused and selected item
-                for (int i = 0; i < visibleItems; i++)
+                if (CheckScissorCollisionPointRec(mousePoint, itemBounds))
                 {
-                    if (CheckScissorCollisionPointRec(mousePoint, itemBounds))
+                    itemFocused = startIndex + i;
+                    if (GuiIsPointerReleased())
                     {
-                        itemFocused = startIndex + i;
-                        if (GUI_BUTTON_RELEASED)
-                        {
-                            if (itemSelected == (startIndex + i)) itemSelected = -1;
-                            else itemSelected = startIndex + i;
-                        }
-                        break;
+                        if (itemSelected == (startIndex + i)) itemSelected = -1;
+                        else itemSelected = startIndex + i;
                     }
-
-                    // Update item rectangle y position for next item
-                    itemBounds.y += (GuiGetStyle(LISTVIEW, LIST_ITEMS_HEIGHT) + GuiGetStyle(LISTVIEW, LIST_ITEMS_SPACING));
+                    break;
                 }
 
-                if (useScrollBar)
-                {
-                    float scrollDelta = GUI_SCROLL_DELTA;
-                    startIndex -= (int)scrollDelta;
+                // Update item rectangle y position for next item
+                itemBounds.y += (GuiGetStyle(LISTVIEW, LIST_ITEMS_HEIGHT) + GuiGetStyle(LISTVIEW, LIST_ITEMS_SPACING));
+            }
 
-                    if (startIndex < 0) startIndex = 0;
-                    else if (startIndex > (count - visibleItems)) startIndex = count - visibleItems;
+            if (useScrollBar)
+            {
+                float scrollDelta = GUI_SCROLL_DELTA;
+                startIndex -= (int)scrollDelta;
 
-                    endIndex = startIndex + visibleItems;
-                    if (endIndex > count) endIndex = count;
-                }
+                if (startIndex < 0) startIndex = 0;
+                else if (startIndex > (count - visibleItems)) startIndex = count - visibleItems;
+
+                endIndex = startIndex + visibleItems;
+                if (endIndex > count) endIndex = count;
             }
         }
-        else itemFocused = -1;
 
         // Reset item rectangle y to [0]
         itemBounds.y = bounds.y + GuiGetStyle(LISTVIEW, LIST_ITEMS_SPACING) + GuiGetStyle(DEFAULT, BORDER_WIDTH);
@@ -4130,7 +4291,7 @@ int GuiListViewEx(Rectangle bounds, char **text, int count, int *scrollIndex, in
     if (focus != NULL) *focus = itemFocused;
     if (scrollIndex != NULL) *scrollIndex = startIndex;
 
-    if (prevActive != *active) result = RESULT_CHANGED;
+    if ((active != NULL) && (prevActive != *active)) result = GuiDiscreteResult(RESULT_CHANGED);
 
     return result;
 }
@@ -4173,7 +4334,7 @@ int GuiTabBarEx(Rectangle bounds, char **text, int count, int *hscroll, int *act
 
     // Draw control
     //--------------------------------------------------------------------
-    //if ((state != STATE_DISABLED) && GuiCanInteract() && !guiControlExclusiveMode) // TODO: Support disabled
+    //if ((state != STATE_DISABLED) && GuiCanInteract()) // TODO: Support disabled
 
     for (int i = 0; i < count; i++)
     {
@@ -4200,7 +4361,7 @@ int GuiTabBarEx(Rectangle bounds, char **text, int count, int *hscroll, int *act
             }
 
             // Close tab with middle mouse button pressed
-            if (CheckScissorCollisionPointRec(GUI_POINTER_POSITION, tabBounds) && GUI_BUTTON_PRESSED_MID) result = RESULT_TAB_CLOSE;
+            if (CheckScissorCollisionPointRec(GuiPointerPosition(), tabBounds) && GUI_BUTTON_PRESSED_MID) result = GuiDiscreteResult(RESULT_TAB_CLOSE);
 
             GuiSetStyle(TOGGLE, TEXT_PADDING, textPadding);
             GuiSetStyle(TOGGLE, TEXT_ALIGNMENT, textAlignment);
@@ -4214,10 +4375,10 @@ int GuiTabBarEx(Rectangle bounds, char **text, int count, int *hscroll, int *act
                 GuiSetStyle(BUTTON, BORDER_WIDTH, 1);
                 GuiSetStyle(BUTTON, TEXT_ALIGNMENT, TEXT_ALIGN_CENTER);
 #if defined(RAYGUI_NO_ICONS)
-                if (GuiButton(RAYGUI_CLITERAL(Rectangle){ tabBounds.x + tabBounds.width - 14 - 5, tabBounds.y + 5, 14, 14 }, "x")) result = RESULT_TAB_CLOSE;
+                if (GuiButton(RAYGUI_CLITERAL(Rectangle){ tabBounds.x + tabBounds.width - 14 - 5, tabBounds.y + 5, 14, 14 }, "x")) result = GuiDiscreteResult(RESULT_TAB_CLOSE);
 #else
                 if (GuiButton(RAYGUI_CLITERAL(Rectangle){ tabBounds.x + tabBounds.width - 14 - 5, tabBounds.y + 5, 14, 14 },
-                    GuiIconText(ICON_CROSS_SMALL, NULL))) result = RESULT_TAB_CLOSE;
+                    GuiIconText(ICON_CROSS_SMALL, NULL))) result = GuiDiscreteResult(RESULT_TAB_CLOSE);
 #endif
                 GuiSetStyle(BUTTON, BORDER_WIDTH, tempBorderWidth);
                 GuiSetStyle(BUTTON, TEXT_ALIGNMENT, tempTextAlignment);
@@ -4278,53 +4439,21 @@ int GuiColorBarAlpha(Rectangle bounds, const char *text, float *alpha)
 
     // Update control
     //--------------------------------------------------------------------
-    GuiUpdateCapture();
+    GuiControlBegin(bounds, GUI_DRAG_HORIZONTAL);
+    GuiRegisterCurrentHit(selector);
     if (state != STATE_DISABLED)
     {
-        Vector2 mousePoint = GUI_POINTER_POSITION;
+        Vector2 mousePoint = GuiPointerPosition();
 
-        if (guiControlExclusiveMode) // Allows to keep dragging outside of bounds
+        if (GuiIsCapturedControl() && (GuiIsPointerDown() || GuiIsPointerReleased()))
         {
-            if (!GUI_BUTTON_DOWN)
-            {
-                guiControlExclusiveMode = false;
-                guiControlExclusiveRec = RAYGUI_CLITERAL(Rectangle){ 0, 0, 0, 0 };
-            }
-            else if (GuiCanInteract())
-            {
-                if (CHECK_BOUNDS_ID(bounds, guiControlExclusiveRec))
-                {
-                    state = STATE_PRESSED;
+            state = (GuiIsPointerReleased())? STATE_FOCUSED : STATE_PRESSED;
 
-                    *alpha = (mousePoint.x - bounds.x)/bounds.width;
-                    if (*alpha <= 0.0f) *alpha = 0.0f;
-                    if (*alpha >= 1.0f) *alpha = 1.0f;
-                }
-            }
+            *alpha = (mousePoint.x - bounds.x)/bounds.width;
+            if (*alpha <= 0.0f) *alpha = 0.0f;
+            if (*alpha >= 1.0f) *alpha = 1.0f;
         }
-        else if ((CheckScissorCollisionPointRec(mousePoint, bounds) ||
-                  CheckScissorCollisionPointRec(mousePoint, selector)) && GuiHitControl())
-        {
-            if (GUI_BUTTON_DOWN)
-            {
-                state = STATE_PRESSED;
-                guiControlExclusiveMode = true;
-                guiControlExclusiveRec = bounds; // Store bounds as an identifier when dragging starts
-
-                *alpha = (mousePoint.x - bounds.x)/bounds.width;
-                if (*alpha <= 0.0f) *alpha = 0.0f;
-                if (*alpha >= 1.0f) *alpha = 1.0f;
-                //selector.x = bounds.x + (int)(((alpha - 0)/(100 - 0))*(bounds.width - 2*GuiGetStyle(SLIDER, BORDER_WIDTH))) - selector.width/2;
-            }
-            else if (GUI_BUTTON_RELEASED)
-            {
-                // Quick click: no held frame, apply the click position on release
-                *alpha = (mousePoint.x - bounds.x)/bounds.width;
-                if (*alpha <= 0.0f) *alpha = 0.0f;
-                if (*alpha >= 1.0f) *alpha = 1.0f;
-            }
-            else state = STATE_FOCUSED;
-        }
+        else if (GuiIsHovered()) state = STATE_FOCUSED;
     }
 
     if (prevAlpha != *alpha) result = RESULT_CHANGED;
@@ -4376,64 +4505,21 @@ int GuiColorBarHue(Rectangle bounds, const char *text, float *hue)
 
     // Update control
     //--------------------------------------------------------------------
-    GuiUpdateCapture();
+    GuiControlBegin(bounds, GUI_DRAG_VERTICAL);
+    GuiRegisterCurrentHit(selector);
     if (state != STATE_DISABLED)
     {
-        Vector2 mousePoint = GUI_POINTER_POSITION;
+        Vector2 mousePoint = GuiPointerPosition();
 
-        if (guiControlExclusiveMode) // Allows to keep dragging outside of bounds
+        if (GuiIsCapturedControl() && (GuiIsPointerDown() || GuiIsPointerReleased()))
         {
-            if (!GUI_BUTTON_DOWN)
-            {
-                guiControlExclusiveMode = false;
-                guiControlExclusiveRec = RAYGUI_CLITERAL(Rectangle){ 0, 0, 0, 0 };
-            }
-            else if (GuiCanInteract())
-            {
-                if (CHECK_BOUNDS_ID(bounds, guiControlExclusiveRec))
-                {
-                    state = STATE_PRESSED;
+            state = (GuiIsPointerReleased())? STATE_FOCUSED : STATE_PRESSED;
 
-                    *hue = (mousePoint.y - bounds.y)*360/bounds.height;
-                    if (*hue <= 0.0f) *hue = 0.0f;
-                    if (*hue >= 359.0f) *hue = 359.0f;
-                }
-            }
+            *hue = (mousePoint.y - bounds.y)*360/bounds.height;
+            if (*hue <= 0.0f) *hue = 0.0f;
+            if (*hue >= 359.0f) *hue = 359.0f;
         }
-        else if ((CheckScissorCollisionPointRec(mousePoint, bounds) ||
-                  CheckScissorCollisionPointRec(mousePoint, selector)) && GuiHitControl())
-        {
-            if (GUI_BUTTON_DOWN)
-            {
-                state = STATE_PRESSED;
-                guiControlExclusiveMode = true;
-                guiControlExclusiveRec = bounds; // Store bounds as an identifier when dragging starts
-
-                *hue = (mousePoint.y - bounds.y)*360/bounds.height;
-                if (*hue <= 0.0f) *hue = 0.0f;
-                if (*hue >= 359.0f) *hue = 359.0f;
-
-            }
-            else if (GUI_BUTTON_RELEASED)
-            {
-                // Quick click: no held frame, apply the click position on release
-                *hue = (mousePoint.y - bounds.y)*360/bounds.height;
-                if (*hue <= 0.0f) *hue = 0.0f;
-                if (*hue >= 359.0f) *hue = 359.0f;
-            }
-            else state = STATE_FOCUSED;
-
-            /*if (GUI_KEY_DOWN(KEY_UP))
-            {
-                hue -= 2.0f;
-                if (hue <= 0.0f) hue = 0.0f;
-            }
-            else if (GUI_KEY_DOWN(KEY_DOWN))
-            {
-                hue += 2.0f;
-                if (hue >= 360.0f) hue = 360.0f;
-            }*/
-        }
+        else if (GuiIsHovered()) state = STATE_FOCUSED;
     }
 
     if (prevHue != *hue) result = RESULT_CHANGED;
@@ -4561,73 +4647,32 @@ int GuiColorPanelHSV(Rectangle bounds, const char *text, Vector3 *colorHsv)
 
     // Update control
     //--------------------------------------------------------------------
-    GuiUpdateCapture();
+    GuiControlBegin(bounds, GUI_DRAG_BOTH);
     if (state != STATE_DISABLED)
     {
-        Vector2 mousePoint = GUI_POINTER_POSITION;
+        Vector2 mousePoint = GuiPointerPosition();
 
-        if (guiControlExclusiveMode) // Allows to keep dragging outside of bounds
+        if (GuiIsCapturedControl() && (GuiIsPointerDown() || GuiIsPointerReleased()))
         {
-            if (!GUI_BUTTON_DOWN)
-            {
-                guiControlExclusiveMode = false;
-                guiControlExclusiveRec = RAYGUI_CLITERAL(Rectangle){ 0, 0, 0, 0 };
-            }
-            else if (GuiCanInteract())
-            {
-                if (CHECK_BOUNDS_ID(bounds, guiControlExclusiveRec))
-                {
-                    pickerSelector = mousePoint;
+            state = (GuiIsPointerReleased())? STATE_FOCUSED : STATE_PRESSED;
 
-                    if (pickerSelector.x < bounds.x) pickerSelector.x = bounds.x;
-                    if (pickerSelector.x > bounds.x + bounds.width) pickerSelector.x = bounds.x + bounds.width;
-                    if (pickerSelector.y < bounds.y) pickerSelector.y = bounds.y;
-                    if (pickerSelector.y > bounds.y + bounds.height) pickerSelector.y = bounds.y + bounds.height;
+            pickerSelector = mousePoint;
 
-                    // Calculate color from picker
-                    Vector2 colorPick = { pickerSelector.x - bounds.x, pickerSelector.y - bounds.y };
+            if (pickerSelector.x < bounds.x) pickerSelector.x = bounds.x;
+            if (pickerSelector.x > bounds.x + bounds.width) pickerSelector.x = bounds.x + bounds.width;
+            if (pickerSelector.y < bounds.y) pickerSelector.y = bounds.y;
+            if (pickerSelector.y > bounds.y + bounds.height) pickerSelector.y = bounds.y + bounds.height;
 
-                    colorPick.x /= (float)bounds.width; // Get normalized value on x
-                    colorPick.y /= (float)bounds.height; // Get normalized value on y
+            // Calculate color from picker
+            Vector2 colorPick = { pickerSelector.x - bounds.x, pickerSelector.y - bounds.y };
 
-                    colorHsv->y = colorPick.x;
-                    colorHsv->z = 1.0f - colorPick.y;
-                }
-            }
+            colorPick.x /= (float)bounds.width;     // Get normalized value on x
+            colorPick.y /= (float)bounds.height;    // Get normalized value on y
+
+            colorHsv->y = colorPick.x;
+            colorHsv->z = 1.0f - colorPick.y;
         }
-        else if (CheckScissorCollisionPointRec(mousePoint, bounds) && GuiHitControl())
-        {
-            if (GUI_BUTTON_DOWN)
-            {
-                state = STATE_PRESSED;
-                guiControlExclusiveMode = true;
-                guiControlExclusiveRec = bounds;
-                pickerSelector = mousePoint;
-
-                // Calculate color from picker
-                Vector2 colorPick = { pickerSelector.x - bounds.x, pickerSelector.y - bounds.y };
-
-                colorPick.x /= (float)bounds.width;     // Get normalized value on x
-                colorPick.y /= (float)bounds.height;    // Get normalized value on y
-
-                colorHsv->y = colorPick.x;
-                colorHsv->z = 1.0f - colorPick.y;
-            }
-            else if (GUI_BUTTON_RELEASED)
-            {
-                // Quick click: no held frame, apply the click position on release
-                pickerSelector = mousePoint;
-
-                Vector2 colorPick = { pickerSelector.x - bounds.x, pickerSelector.y - bounds.y };
-
-                colorPick.x /= (float)bounds.width;
-                colorPick.y /= (float)bounds.height;
-
-                colorHsv->y = colorPick.x;
-                colorHsv->z = 1.0f - colorPick.y;
-            }
-            else state = STATE_FOCUSED;
-        }
+        else if (GuiIsHovered()) state = STATE_FOCUSED;
     }
 
     if ((prevColorHsv.x != colorHsv->x) ||
@@ -4734,10 +4779,6 @@ int GuiTextInputBox(Rectangle bounds, const char *title, const char *message, ch
 
     int result = RESULT_NONE;
 
-    // Used to enable text edit mode
-    // WARNING: No more than one GuiTextInputBox() should be open at the same time
-    static bool textEditMode = false;
-
     int buttonCount = 0;
     char **btnTextList = GuiTextSplit(btnText, ';', &buttonCount);
     Rectangle buttonBounds = { 0 };
@@ -4790,8 +4831,15 @@ int GuiTextInputBox(Rectangle bounds, const char *title, const char *message, ch
     if (secretViewActive != NULL)
     {
         static char stars[] = "****************";
-        if (GuiTextBox(RAYGUI_CLITERAL(Rectangle){ textBoxBounds.x, textBoxBounds.y, textBoxBounds.width - 4 - RAYGUI_TEXTINPUTBOX_HEIGHT, textBoxBounds.height },
-            ((*secretViewActive == 1) || textEditMode)? text : stars, textSize, textEditMode) == RESULT_PRESSED) textEditMode = !textEditMode;
+        Rectangle innerTextBox = { textBoxBounds.x, textBoxBounds.y, textBoxBounds.width - 4 - RAYGUI_TEXTINPUTBOX_HEIGHT, textBoxBounds.height };
+
+        // Show the real text only while this inner text box is being edited (or revealed)
+        bool editing = (guiCapture.editId != 0) && (guiCapture.editId == guiCapture.dialogTextId);
+        bool pressedInside = GuiHitTest(innerTextBox) && (GuiIsPointerPressed() || GuiIsPointerDown());
+        char *displayText = ((*secretViewActive == 1) || editing || pressedInside)? text : stars;
+
+        GuiTextBox(innerTextBox, displayText, textSize);
+        guiCapture.dialogTextId = guiCapture.currentId;
 
 #if defined(RAYGUI_NO_ICONS)
         GuiToggle(RAYGUI_CLITERAL(Rectangle){ textBoxBounds.x + textBoxBounds.width - RAYGUI_TEXTINPUTBOX_HEIGHT, textBoxBounds.y, RAYGUI_TEXTINPUTBOX_HEIGHT, RAYGUI_TEXTINPUTBOX_HEIGHT },
@@ -4803,8 +4851,8 @@ int GuiTextInputBox(Rectangle bounds, const char *title, const char *message, ch
     }
     else
     {
-        if (GuiTextBox(textBoxBounds, text, textSize, textEditMode) == RESULT_PRESSED)
-            textEditMode = !textEditMode;
+        GuiTextBox(textBoxBounds, text, textSize);
+        guiCapture.dialogTextId = guiCapture.currentId;
     }
 
     GuiSetStyle(TEXTBOX, TEXT_ALIGNMENT, prevTextBoxAlignment);
@@ -4822,8 +4870,6 @@ int GuiTextInputBox(Rectangle bounds, const char *title, const char *message, ch
 
         buttonBounds.x += (buttonBounds.width + RAYGUI_MESSAGEBOX_BUTTON_PADDING);
     }
-
-    if (result == RESULT_PRESSED) textEditMode = false;
 
     GuiSetStyle(BUTTON, TEXT_ALIGNMENT, prevBtnTextAlignment);
     //--------------------------------------------------------------------
@@ -4845,7 +4891,7 @@ int GuiGrid(Rectangle bounds, const char *text, float spacing, int subdivs, Vect
     int result = RESULT_NONE;
     GuiState state = guiState;
 
-    Vector2 mousePoint = GUI_POINTER_POSITION;
+    Vector2 mousePoint = GuiPointerPosition();
     Vector2 currentMouseCell = { -1, -1 };
 
     float spaceWidth = spacing/(float)subdivs;
@@ -4856,15 +4902,13 @@ int GuiGrid(Rectangle bounds, const char *text, float spacing, int subdivs, Vect
 
     // Update control
     //--------------------------------------------------------------------
-    if ((state != STATE_DISABLED) && !guiLocked && !guiControlExclusiveMode)
+    if ((state != STATE_DISABLED) && !guiLocked)
     {
-        if (CheckScissorCollisionPointRec(mousePoint, bounds))
+        if (GuiHitTest(bounds))
         {
             // NOTE: Cell values must be the upper left of the cell the mouse is in
             currentMouseCell.x = floorf((mousePoint.x - bounds.x)/spacing);
             currentMouseCell.y = floorf((mousePoint.y - bounds.y)/spacing);
-
-            result = RESULT_PRESSED;
         }
     }
     //--------------------------------------------------------------------
@@ -4907,33 +4951,8 @@ void GuiSetScissor(Rectangle rect)
 //----------------------------------------------------------------------------------
 // Control capture functions
 //----------------------------------------------------------------------------------
-// Set id for the controls drawn next, 0 means "not capturable"
-// NOTE: First call with a non-zero id enables capture mode for the whole UI
-void GuiSetCapturedId(int id)
-{
-    curGuiId = id;
-    if (id != 0) captureEnabled = true;
-}
-
-// Get current captured id, 0 if no capture is active
-int GuiGetCapturedId(void)
-{
-    return captureHeld? captureGuiId : 0;
-}
-
-// Push current id and set a new one for the controls drawn next
-void GuiPushId(int id)
-{
-    if (guiCaptureIdStackCount < RAYGUI_MAX_CAPTURE_ID_STACK) guiCaptureIdStack[guiCaptureIdStackCount++] = curGuiId;
-    curGuiId = id;
-    if (id != 0) captureEnabled = true;
-}
-
-// Restore previous id
-void GuiPopId(void)
-{
-    if (guiCaptureIdStackCount > 0) curGuiId = guiCaptureIdStack[--guiCaptureIdStackCount];
-}
+// NOTE: GuiBeginFrame/GuiBeginFromRaylib/GuiEnd/GuiGetCapturedId are defined before the
+// controls (see "Frame management" above), capture ids are assigned automatically.
 
 //----------------------------------------------------------------------------------
 // Tooltip management functions
@@ -6151,7 +6170,7 @@ static bool CheckScissorCollisionPointRec(Vector2 point, Rectangle rec)
 // Draw tooltip using control bounds
 static void GuiTooltip(Rectangle controlRec)
 {
-    if (GuiCanInteract() && guiTooltip && (guiTooltipPtr != NULL) && !guiControlExclusiveMode)
+    if (GuiIsHovered() && guiTooltip && (guiTooltipPtr != NULL))
     {
         Vector2 textSize = MeasureTextEx(guiFont, guiTooltipPtr, (float)GuiGetStyle(DEFAULT, TEXT_SIZE),
             (float)GuiGetStyle(DEFAULT, TEXT_SPACING));
@@ -6244,82 +6263,43 @@ static int GuiScrollBar(Rectangle bounds, int value, int minValue, int maxValue)
 
     // Update control
     //--------------------------------------------------------------------
-    GuiUpdateCapture();
+    GuiControlBegin(bounds, isVertical? GUI_DRAG_VERTICAL : GUI_DRAG_HORIZONTAL);
     if (state != STATE_DISABLED)
     {
-        Vector2 mousePoint = GUI_POINTER_POSITION;
+        Vector2 mousePoint = GuiPointerPosition();
+        bool captured = GuiIsCapturedControl();
 
-        if (guiControlExclusiveMode) // Allows to keep dragging outside of bounds
+        if (captured && GuiIsPointerDown() && guiCapture.didDrag)
         {
-            if (!GUI_BUTTON_DOWN ||
-                CheckScissorCollisionPointRec(mousePoint, arrowUpLeft) ||
-                CheckScissorCollisionPointRec(mousePoint, arrowDownRight))
-            {
-                guiControlExclusiveMode = false;
-                guiControlExclusiveRec = RAYGUI_CLITERAL(Rectangle){ 0, 0, 0, 0 };
-            }
-            else if (GuiCanInteract())
-            {
-                if (CHECK_BOUNDS_ID(bounds, guiControlExclusiveRec))
-                {
-                    state = STATE_PRESSED;
+            state = STATE_PRESSED;
 
+            if (isVertical) value = (int)(((float)(mousePoint.y - scrollbar.y - slider.height/2)*valueRange)/(scrollbar.height - slider.height) + minValue);
+            else value = (int)(((float)(mousePoint.x - scrollbar.x - slider.width/2)*valueRange)/(scrollbar.width - slider.width) + minValue);
+        }
+        else if (captured && GuiIsPointerReleased())
+        {
+            // Quick click: no held frame, apply arrows or track click on release
+            if (!guiCapture.didDrag)
+            {
+                if (CheckScissorCollisionPointRec(mousePoint, arrowUpLeft)) value -= valueRange/GuiGetStyle(SCROLLBAR, SCROLL_SPEED);
+                else if (CheckScissorCollisionPointRec(mousePoint, arrowDownRight)) value += valueRange/GuiGetStyle(SCROLLBAR, SCROLL_SPEED);
+                else if (!CheckScissorCollisionPointRec(mousePoint, slider))
+                {
                     if (isVertical) value = (int)(((float)(mousePoint.y - scrollbar.y - slider.height/2)*valueRange)/(scrollbar.height - slider.height) + minValue);
                     else value = (int)(((float)(mousePoint.x - scrollbar.x - slider.width/2)*valueRange)/(scrollbar.width - slider.width) + minValue);
                 }
             }
+
+            state = STATE_FOCUSED;
         }
-        else if (CheckScissorCollisionPointRec(mousePoint, bounds) && GuiHitControl())
+        else if (captured) state = STATE_PRESSED;
+        else if (GuiIsHovered())
         {
             state = STATE_FOCUSED;
 
             // Handle mouse wheel
             float scrollDelta = GUI_SCROLL_DELTA;
             if (scrollDelta != 0) value += (int)scrollDelta;
-
-            // Handle mouse button down
-            if (GUI_BUTTON_DOWN)
-            {
-                guiControlExclusiveMode = true;
-                guiControlExclusiveRec = bounds; // Store bounds as an identifier when dragging starts
-
-                // Check arrows click
-                if (CheckScissorCollisionPointRec(mousePoint, arrowUpLeft)) value -= valueRange/GuiGetStyle(SCROLLBAR, SCROLL_SPEED);
-                else if (CheckScissorCollisionPointRec(mousePoint, arrowDownRight)) value += valueRange/GuiGetStyle(SCROLLBAR, SCROLL_SPEED);
-                else if (!CheckScissorCollisionPointRec(mousePoint, slider))
-                {
-                    // If click on scrollbar position but not on slider, place slider directly on that position
-                    if (isVertical) value = (int)(((float)(mousePoint.y - scrollbar.y - slider.height/2)*valueRange)/(scrollbar.height - slider.height) + minValue);
-                    else value = (int)(((float)(mousePoint.x - scrollbar.x - slider.width/2)*valueRange)/(scrollbar.width - slider.width) + minValue);
-                }
-
-                state = STATE_PRESSED;
-            }
-            else if (GUI_BUTTON_RELEASED)
-            {
-                // Quick click: no held frame, apply the click position on release
-                if (CheckScissorCollisionPointRec(mousePoint, arrowUpLeft)) value -= valueRange/GuiGetStyle(SCROLLBAR, SCROLL_SPEED);
-                else if (CheckScissorCollisionPointRec(mousePoint, arrowDownRight)) value += valueRange/GuiGetStyle(SCROLLBAR, SCROLL_SPEED);
-                else if (!CheckScissorCollisionPointRec(mousePoint, slider))
-                {
-                    if (isVertical) value = (int)(((float)(mousePoint.y - scrollbar.y - slider.height/2)*valueRange)/(scrollbar.height - slider.height) + minValue);
-                    else value = (int)(((float)(mousePoint.x - scrollbar.x - slider.width/2)*valueRange)/(scrollbar.width - slider.width) + minValue);
-                }
-            }
-
-            // Keyboard control on mouse hover scrollbar
-            /*
-            if (isVertical)
-            {
-            if (GUI_KEY_DOWN(KEY_DOWN)) value += 5;
-            else if (GUI_KEY_DOWN(KEY_UP)) value -= 5;
-            }
-            else
-            {
-            if (GUI_KEY_DOWN(KEY_RIGHT)) value += 5;
-            else if (GUI_KEY_DOWN(KEY_LEFT)) value -= 5;
-            }
-            */
         }
 
         // Normalize value

@@ -43,7 +43,6 @@ int main(int argc, char *argv[])
     int pixelFormatActive = 0;
     const char *pixelFormatTextList[7] = { "GRAYSCALE", "GRAY ALPHA", "R5G6B5", "R8G8B8", "R5G5B5A1", "R4G4B4A4", "R8G8B8A8" };
 
-    bool textBoxEditMode = false;
     char fileName[64] = "untitled";
     //--------------------------------------------------------------------------------------
     
@@ -137,6 +136,8 @@ int main(int argc, char *argv[])
         //----------------------------------------------------------------------------------
         BeginDrawing();
 
+            GuiBeginFromRaylib();
+
             ClearBackground(RAYWHITE);
 
             if (texture.id > 0)
@@ -167,7 +168,7 @@ int main(int argc, char *argv[])
                 GuiLabel((Rectangle){ windowBoxRec.x + 10, windowBoxRec.y + 70, 63, 25 }, "Pixel format:");
                 GuiComboBox((Rectangle){ windowBoxRec.x + 80, windowBoxRec.y + 70, 130, 25 }, TextJoin(pixelFormatTextList, 7, ";"), &pixelFormatActive); 
                 GuiLabel((Rectangle){ windowBoxRec.x + 10, windowBoxRec.y + 105, 50, 25 }, "File name:");
-                if (GuiTextBox((Rectangle){ windowBoxRec.x + 80, windowBoxRec.y + 105, 130, 25 }, fileName, 64, textBoxEditMode)) textBoxEditMode = !textBoxEditMode;
+                GuiTextBox((Rectangle){ windowBoxRec.x + 80, windowBoxRec.y + 105, 130, 25 }, fileName, 64);
 
                 btnExportPressed = GuiButton((Rectangle){ windowBoxRec.x + 10, windowBoxRec.y + 145, 200, 30 }, "Export Image");
             }
@@ -175,6 +176,8 @@ int main(int argc, char *argv[])
             
             if (btnExportPressed) DrawText("Image exported!", 20, screenHeight - 20, 20, RED);
             //-----------------------------------------------------------------------------
+
+            GuiEndFromRaylib();
 
         EndDrawing();
         //----------------------------------------------------------------------------------

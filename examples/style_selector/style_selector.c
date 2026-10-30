@@ -115,6 +115,8 @@ int main()
         //----------------------------------------------------------------------------------
         BeginDrawing();
 
+            GuiBeginFromRaylib();
+
             ClearBackground(GetColor(GuiGetStyle(DEFAULT, BACKGROUND_COLOR)));
 
             // Visuals options
@@ -131,6 +133,8 @@ int main()
             //GuiButton((Rectangle){ 25, 255, 300, 30 }, GuiIconText(ICON_FILE_SAVE, "Save File"));
             //GuiSetStyle(BUTTON, TEXT_ALIGNMENT, TEXT_ALIGN_CENTER);
             //----------------------------------------------------------------------------------
+
+            GuiEndFromRaylib();
 
         EndDrawing();
         //----------------------------------------------------------------------------------

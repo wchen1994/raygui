@@ -67,6 +67,8 @@ int main()
         //----------------------------------------------------------------------------------
         BeginDrawing();
 
+            GuiBeginFromRaylib();
+
             ClearBackground(GetColor(GuiGetStyle(DEFAULT, BACKGROUND_COLOR)));
 
             if (vSliderEditMode || vSliderBarEditMode) GuiLock();
@@ -84,6 +86,8 @@ int main()
             if (GuiVerticalSliderOwning((Rectangle){ 432, 120, 24, 192 }, NULL, TextFormat("%0.2f", value), &value, 0.0f, 1.0f, vSliderEditMode)) vSliderEditMode = !vSliderEditMode;
             if (GuiVerticalSliderBarOwning((Rectangle){ 576, 120, 24, 192 }, NULL, TextFormat("%0.2f", value), &value, 0.0f, 1.0f, vSliderBarEditMode)) vSliderBarEditMode = !vSliderBarEditMode;
             //----------------------------------------------------------------------------------
+
+            GuiEndFromRaylib();
 
         EndDrawing();
         //----------------------------------------------------------------------------------

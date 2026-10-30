@@ -73,6 +73,8 @@ int main()
         // Draw
         //----------------------------------------------------------------------------------
         BeginDrawing();
+
+            GuiBeginFromRaylib();
         
             ClearBackground(GetColor(GuiGetStyle(DEFAULT, BACKGROUND_COLOR)));
         
@@ -85,6 +87,8 @@ int main()
                 DrawText(TextFormat("FOCUS:%i | SCROLL:%i | FPS:%i", focus, scroll, GetFPS()), prop[8].value.v2.x, prop[8].value.v2.y, 20, prop[11].value.vcolor);
             }
             
+            GuiEndFromRaylib();
+
         EndDrawing();
         //----------------------------------------------------------------------------------
     }

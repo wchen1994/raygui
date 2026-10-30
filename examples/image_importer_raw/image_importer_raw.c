@@ -45,9 +45,7 @@ int main()
     bool importWindowActive = false;
     
     int widthValue = 0;
-    bool widthEditMode = false;
     int heightValue = 0;
-    bool heightEditMode = false;
     
     int pixelFormatActive = 0;
     const char *pixelFormatTextList[8] = { "CUSTOM", "GRAYSCALE", "GRAY ALPHA", "R5G6B5", "R8G8B8", "R5G5B5A1", "R4G4B4A4", "R8G8B8A8" };
@@ -58,7 +56,6 @@ int main()
     const char *bitDepthTextList[3] = { "8", "16", "32" };
     
     int headerSizeValue = 0;
-    bool headerSizeEditMode = false;
     //----------------------------------------------------------------------------------
     
     // Image file info
@@ -167,6 +164,8 @@ int main()
         //----------------------------------------------------------------------------------
         BeginDrawing();
 
+            GuiBeginFromRaylib();
+
             ClearBackground(GetColor(GuiGetStyle(DEFAULT, BACKGROUND_COLOR)));
             
             if (texture.id != 0) 
@@ -188,10 +187,10 @@ int main()
                 GuiLabel((Rectangle){ windowOffset.x + 85, windowOffset.y + 50, 75, 20 }, TextFormat("%i bytes", dataSize));
                 GuiGroupBox((Rectangle){ windowOffset.x + 10, windowOffset.y + 85, 180, 80 }, "Resolution");
                 GuiLabel((Rectangle){ windowOffset.x + 20, windowOffset.y + 100, 33, 25 }, "Width:");
-                if (GuiValueBox((Rectangle){ windowOffset.x + 60, windowOffset.y + 100, 80, 25 }, NULL, &widthValue, 0, 8192, widthEditMode)) widthEditMode = !widthEditMode; 
+                GuiValueBox((Rectangle){ windowOffset.x + 60, windowOffset.y + 100, 80, 25 }, NULL, &widthValue, 0, 8192); 
                 GuiLabel((Rectangle){ windowOffset.x + 145, windowOffset.y + 100, 30, 25 }, "pixels");
                 GuiLabel((Rectangle){ windowOffset.x + 20, windowOffset.y + 130, 33, 25 }, "Height:");
-                if (GuiValueBox((Rectangle){ windowOffset.x + 60, windowOffset.y + 130, 80, 25 }, NULL, &heightValue, 0, 8192, heightEditMode)) heightEditMode = !heightEditMode; 
+                GuiValueBox((Rectangle){ windowOffset.x + 60, windowOffset.y + 130, 80, 25 }, NULL, &heightValue, 0, 8192); 
                 GuiLabel((Rectangle){ windowOffset.x + 145, windowOffset.y + 130, 30, 25 }, "pixels");
                 GuiGroupBox((Rectangle){ windowOffset.x + 10, windowOffset.y + 180, 180, 160 }, "Pixel Format");
                 GuiComboBox((Rectangle){ windowOffset.x + 20, windowOffset.y + 195, 160, 25 }, TextJoin(pixelFormatTextList, 8, ";"), &pixelFormatActive);
@@ -206,12 +205,14 @@ int main()
                 
                 GuiGroupBox((Rectangle){ windowOffset.x + 10, windowOffset.y + 355, 180, 50 }, "Header");
                 GuiLabel((Rectangle){ windowOffset.x + 25, windowOffset.y + 370, 27, 25 }, "Size:");
-                if (GuiValueBox((Rectangle){ windowOffset.x + 55, windowOffset.y + 370, 85, 25 }, NULL, &headerSizeValue, 0, 10000, headerSizeEditMode)) headerSizeEditMode = !headerSizeEditMode; 
+                GuiValueBox((Rectangle){ windowOffset.x + 55, windowOffset.y + 370, 85, 25 }, NULL, &headerSizeValue, 0, 10000); 
                 GuiLabel((Rectangle){ windowOffset.x + 145, windowOffset.y + 370, 30, 25 }, "bytes");
                 
                 btnLoadPressed = GuiButton((Rectangle){ windowOffset.x + 10, windowOffset.y + 420, 180, 30 }, "Import RAW");
             }
             //----------------------------------------------------------------------------------
+
+            GuiEndFromRaylib();
 
         EndDrawing();
         //----------------------------------------------------------------------------------

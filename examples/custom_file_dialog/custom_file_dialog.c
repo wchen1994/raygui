@@ -75,6 +75,8 @@ int main()
         //----------------------------------------------------------------------------------
         BeginDrawing();
 
+            GuiBeginFromRaylib();
+
             ClearBackground(GetColor(GuiGetStyle(DEFAULT, BACKGROUND_COLOR)));
 
             DrawTexture(texture, GetScreenWidth()/2 - texture.width/2, GetScreenHeight()/2 - texture.height/2 - 5, WHITE);
@@ -96,6 +98,8 @@ int main()
             //--------------------------------------------------------------------------------
 
             //----------------------------------------------------------------------------------
+
+            GuiEndFromRaylib();
 
         EndDrawing();
         //----------------------------------------------------------------------------------
