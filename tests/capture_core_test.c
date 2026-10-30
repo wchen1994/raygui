@@ -660,16 +660,56 @@ static void TestDropdownLockedModal(void)
     gDropdownActive = 0;
     gUnderDropdownClicks = 0;
 
-    // Open normally, then lock the UI and close by clicking outside
+    // Open normally, then lock the UI: the open popup must freeze as well
     PressRelease(RAYGUI_CLITERAL(Vector2){ 50, 15 }, DrawDropdownOverButton);
     CHECK((guiCapture.dropdownOpenId != 0), "dropdown is open before locking");
 
     GuiLock();
     PressRelease(RAYGUI_CLITERAL(Vector2){ 300, 300 }, DrawDropdownOverButton);
+    CHECK((guiCapture.dropdownOpenId != 0), "locked dropdown stays open and ignores clicks");
+    CHECK(gUnderDropdownClicks == 0, "locked dropdown does not activate the underlying button");
     GuiUnlock();
 
-    CHECK((guiCapture.dropdownOpenId == 0), "open dropdown can still close while the UI is locked");
-    CHECK(gUnderDropdownClicks == 0, "locked dropdown does not activate the underlying button");
+    // After unlocking the normal outside click closes it
+    PressRelease(RAYGUI_CLITERAL(Vector2){ 300, 300 }, DrawDropdownOverButton);
+    CHECK((guiCapture.dropdownOpenId == 0), "dropdown closes after unlocking");
+    CHECK(gUnderDropdownClicks == 0, "unlocked dropdown does not activate the underlying button");
+}
+
+static void TestLockBlocksContinuousAndTextControls(void)
+{
+    ResetGui();
+    gSliderValue = 0.5f;
+    gSliderResult = RESULT_NONE;
+
+    // Locked slider cannot be dragged
+    GuiLock();
+    Begin(RAYGUI_CLITERAL(Vector2){ 100, 15 }, true, true, false);
+    DrawSliderOnly();
+    End();
+    Begin(RAYGUI_CLITERAL(Vector2){ 170, 15 }, true, false, false);
+    DrawSliderOnly();
+    End();
+    Begin(RAYGUI_CLITERAL(Vector2){ 170, 15 }, false, false, true);
+    DrawSliderOnly();
+    End();
+    GuiUnlock();
+
+    CHECK(gSliderValue == 0.5f, "locked slider does not react to dragging");
+    CHECK(gSliderResult == RESULT_NONE, "locked slider returns no result");
+
+    // Locked text box cannot enter edit mode
+    ResetGui();
+    strcpy(gTextBoxText, "abc");
+    GuiLock();
+    PressRelease(RAYGUI_CLITERAL(Vector2){ 10, 10 }, DrawTextBoxOnly);
+    GuiUnlock();
+
+    CHECK(!GuiIsEditing(), "locked text box does not enter edit mode");
+
+    // Unlocked, the same click works
+    PressRelease(RAYGUI_CLITERAL(Vector2){ 10, 10 }, DrawTextBoxOnly);
+    CHECK(GuiIsEditing(), "text box edits normally after unlocking");
 }
 
 static void TestComboBoxSelector(void)
@@ -702,6 +742,18 @@ static void TestScrollPanelWheel(void)
 
     CHECK(gScroll.y < 0.0f, "mouse wheel scrolls the panel");
     CHECK(gScrollResult == RESULT_CHANGED, "scroll panel returns RESULT_CHANGED when scroll changes");
+
+    // Locked panel does not scroll
+    gScroll = RAYGUI_CLITERAL(Vector2){ 0, 0 };
+    GuiLock();
+    Begin(RAYGUI_CLITERAL(Vector2){ 50, 100 }, false, false, false);
+    gWheel = -1.0f;
+    DrawScrollPanel();
+    End();
+    gWheel = 0.0f;
+    GuiUnlock();
+
+    CHECK(gScroll.y == 0.0f, "locked scroll panel does not scroll with the wheel");
 }
 
 static void TestGridDoesNotTrigger(void)
@@ -1016,6 +1068,7 @@ int main(void)
     TestTwoSpinnersExclusiveInput();
     TestDropdownModal();
     TestDropdownLockedModal();
+    TestLockBlocksContinuousAndTextControls();
     TestComboBoxSelector();
     TestScrollPanelWheel();
     TestGridDoesNotTrigger();

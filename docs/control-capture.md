@@ -113,6 +113,8 @@ release 帧的返回规则：
     粘贴等交互与 TextBox 一致；输入数字不会在提交前修改 `*value`。
   - **Dropdown 的展开状态也由 GUI 内部保存**（`dropdownOpenId`），业务层不需要 editMode 变量。
 - `GuiGrid()` 不再返回 `RESULT_PRESSED`，只输出 `mouseCell`。
+- `GuiLock()` 阻断所有输入（指针、键盘、滚轮），包括正在编辑的 TextBox、展开的 Dropdown 和
+  拖动中的 Slider/ScrollBar；锁定期间交互状态冻结，解锁后继续。
 
 ## 6. 示例迁移
 
@@ -151,7 +153,8 @@ GuiEndFromRaylib();
 - Spinner 内部 ValueBox 编辑、Enter 提交、箭头步进，以及编辑中点箭头“提交 + 步进”；
 - Spinner 从 TextBox 抢占编辑焦点；
 - 两个 Spinner 同时存在时只有一个接收输入，点击另一个会切换焦点；
-- Dropdown 展开/选中/外部关闭/`GuiLock()` 下关闭；
+- Dropdown 展开/选中/外部关闭；`GuiLock()` 时冻结，解锁后正常关闭；
+- `GuiLock()` 阻断 Slider 拖动、文本编辑、Dropdown 交互和 ScrollPanel 滚轮；
 - ComboBox selector 仍可翻页；
 - ScrollPanel 滚轮与返回值；
 - `GuiGrid` 不产生离散触发；

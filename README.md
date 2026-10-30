@@ -107,6 +107,7 @@ Rules:
 - Without capture only the topmost hit control is highlighted; with capture only the capture holder is. Hover ownership does not drift with the pointer.
 - Editing TextBox and expanded DropdownBox are modal: clicking outside only ends their interaction and never activates controls underneath.
 - Only one discrete control returns a result per frame.
+- `GuiLock()` blocks every input path (pointer, keyboard, wheel), including an active text editor, an open dropdown and an in-progress slider drag. Interaction state freezes and resumes after `GuiUnlock()`.
 - `GuiGetCapturedId()` returns the active control id (`0` when idle). Ids are internal and are not exposed to the application.
 - Control ids are assigned automatically in draw order. Draw dynamic lists whose item count can change **after** all fixed controls: otherwise the ids of the controls drawn after the list shift and an in-progress Slider/ScrollPanel drag can lose its capture.
 - TextBox, ValueBox, ValueBoxFloat, Spinner and DropdownBox manage their edit/open state internally. Only one text control can be edited at a time: clicking another one commits the previous editor and switches focus, and keyboard input only reaches the active control. Use `GuiIsEditing()` to check whether any text control is being edited.

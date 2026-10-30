@@ -1960,12 +1960,14 @@ static void GuiRegisterCurrentHit(Rectangle bounds)
 // Check if the current control owns the confirmed capture
 static bool GuiIsCapturedControl(void)
 {
+    if (guiLocked) return false;
     return (guiCapture.currentId != 0) && (guiCapture.currentId == guiCapture.capturedId) && guiCapture.isConfirmed;
 }
 
 // Check if the current control is the hover target for this frame
 static bool GuiIsHovered(void)
 {
+    if (guiLocked) return false;
     return (guiCapture.currentId != 0) && (guiCapture.currentId == guiCapture.hoverId);
 }
 
@@ -2026,11 +2028,10 @@ static bool GuiHitControl(void)
 {
     unsigned int id = guiCapture.currentId;
     if (id == 0) return false;
-
-    // Modal controls own the pointer until they finish, even when the UI is locked
-    if (GuiIsModal()) return true;
-
     if (guiLocked) return false;
+
+    // Modal controls own the pointer until they finish
+    if (GuiIsModal()) return true;
 
     // Press frame only registers capture candidates, no side effects
     if (guiCapture.inputPressed) return false;
@@ -2063,8 +2064,8 @@ static bool GuiCanInteract(void)
 {
     unsigned int id = guiCapture.currentId;
     if (id == 0) return false;
-    if (GuiIsModal()) return true;
     if (guiLocked) return false;
+    if (GuiIsModal()) return true;
     if (guiCapture.inputPressed) return false;
     if (!guiCapture.isConfirmed) return false;
 
@@ -2483,14 +2484,14 @@ int GuiScrollPanel(Rectangle bounds, const char *text, Rectangle content, Vector
     if (state != STATE_DISABLED)
     {
         // Panel hover/state: only when no other control owns the capture
-        if (GuiHitTest(bounds) && ((guiCapture.capturedId == 0) || (guiCapture.capturedId == panelId)))
+        if (!guiLocked && GuiHitTest(bounds) && ((guiCapture.capturedId == 0) || (guiCapture.capturedId == panelId)))
         {
             if (GuiIsPointerDown() && (guiCapture.tentativeId == panelId)) state = STATE_PRESSED;
             else if (guiCapture.hoverId == panelId) state = STATE_FOCUSED;
         }
 
         // Wheel scrolling is independent from capture, only blocked by modals and drags
-        if (GuiHitTest(bounds) && (guiCapture.modalId == 0) &&
+        if (!guiLocked && GuiHitTest(bounds) && (guiCapture.modalId == 0) &&
             ((guiCapture.capturedId == 0) || (guiCapture.capturedId == panelId)))
         {
 #if defined(SUPPORT_SCROLLBAR_KEY_INPUT)
@@ -3076,7 +3077,7 @@ int GuiDropdownBox(Rectangle bounds, const char *text, int *active)
 
             itemBounds = bounds;
 
-            if (GuiIsPointerReleased())
+            if (!guiLocked && GuiIsPointerReleased())
             {
                 if (itemFocused >= 0) itemSelected = itemFocused;
 
@@ -3208,6 +3209,9 @@ static int GuiTextBoxStyled(Rectangle bounds, char *text, int textSize, int styl
 
     bool hit = GuiHitTest(bounds);
     bool editing = (guiCapture.editId == guiCapture.currentId) && (guiCapture.modalId == guiCapture.currentId);
+    // Locking freezes the whole update section; the editor is still drawn
+    if (!guiLocked)
+    {
 
     // Commit marker set on an outside press is delivered on the release frame
     if ((guiCapture.commitId == guiCapture.currentId) && GuiIsPointerReleased())
@@ -3613,6 +3617,14 @@ static int GuiTextBoxStyled(Rectangle bounds, char *text, int textSize, int styl
         {
             if (!editing && GuiIsHovered()) state = STATE_FOCUSED;
         }
+    }
+    }
+
+    // Keep the active editor modal and highlighted while locked
+    if (editing)
+    {
+        GuiSetModal();
+        state = STATE_PRESSED;
     }
     //--------------------------------------------------------------------
 
@@ -4835,7 +4847,7 @@ int GuiTextInputBox(Rectangle bounds, const char *title, const char *message, ch
 
         // Show the real text only while this inner text box is being edited (or revealed)
         bool editing = (guiCapture.editId != 0) && (guiCapture.editId == guiCapture.dialogTextId);
-        bool pressedInside = GuiHitTest(innerTextBox) && (GuiIsPointerPressed() || GuiIsPointerDown());
+        bool pressedInside = !guiLocked && GuiHitTest(innerTextBox) && (GuiIsPointerPressed() || GuiIsPointerDown());
         char *displayText = ((*secretViewActive == 1) || editing || pressedInside)? text : stars;
 
         GuiTextBox(innerTextBox, displayText, textSize);
