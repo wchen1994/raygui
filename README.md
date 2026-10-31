@@ -99,22 +99,52 @@ GuiScrollPanel(panelRec, NULL, contentRec, &scroll, &view);
 GuiEndFromRaylib();
 ```
 
+For a custom backend, inject inputs directly instead of reading raylib:
+
+```c
+GuiInput inputs[2] = {
+    { { 20, 40 }, true, false, true, 0 },   // position, pressed, released, down, touchId
+    { { 240, 40 }, false, false, true, 1 }
+};
+
+GuiBegin(inputs, 2);
+// ... draw UI ...
+GuiEnd();
+```
+
+Independent UI regions (for example a left joystick and right buttons) use sibling contexts, each routed to its own touch. Start with `GuiBegin(inputs, count)`, then push/pop in order:
+
+```c
+GuiPushContext(&leftContext, leftBounds);
+DrawLeftUI();          // only touches inside leftBounds reach this context
+GuiPopContext();
+
+GuiPushContext(&rightContext, rightBounds);
+DrawRightUI();
+GuiPopContext();
+```
+
+Contexts are flat (no nesting) and keep their capture across frames. `GuiCancel(&ctx)` silently clears all interaction state (window focus loss, context removal); `GuiReleaseCapture(&ctx)` drops only the capture. `GuiSetDragThreshold(px)` / `GuiGetDragThreshold()` configure the drag threshold at runtime.
+
 Rules:
 
 - The press frame is capture-only: no control runs interaction side effects. The topmost hit control becomes the tentative owner.
 - Click-like results are returned on release. Dragging starts after the 5 px drag threshold; direction arbitration then transfers the capture to the first hit control supporting that direction (for example a Slider under a floating Button). If no control supports the direction, the topmost press owner keeps the capture, so a Button still triggers after a small drag.
 - The capture owner keeps the interaction while the pointer leaves its bounds, but the release position matters: a discrete control (Button, Toggle, CheckBox, ComboBox, ...) released outside its bounds is cancelled, while a continuous drag (Slider, ScrollBar, ColorPanel) may finish outside and keeps updating.
+- The default context uses only the first input of the frame; extra touches are ignored. With `GuiPushContext()`, each context receives one unclaimed touch inside its bounds, and keeps that touch routed until release even if it moves outside the bounds.
+- A touch already routed/captured by one context is never delivered to a sibling context. Contexts are isolation units, not concurrency units: use one context per independent touch area.
+- `GuiBeginFrame()`/`GuiEndFrame()` are the macro-driven convenience pair used by standalone backends; `GuiBegin()`/`GuiEnd()` take explicit `GuiInput` snapshots. All three frame pairs are paired and cannot be mixed within a frame.
 - Without capture only the topmost hit control is highlighted; with capture only the capture holder is. Hover ownership does not drift with the pointer.
 - Editing TextBox and expanded DropdownBox are modal: clicking outside only ends their interaction and never activates controls underneath.
-- Only one discrete control returns a result per frame.
+- Only one discrete control returns a result per context per frame.
 - `GuiLock()` blocks every input path (pointer, keyboard, wheel), including an active text editor, an open dropdown and an in-progress slider drag. Interaction state freezes and resumes after `GuiUnlock()`.
 - `GuiGetCapturedId()` returns the active control id (`0` when idle). Ids are internal and are not exposed to the application.
 - Control ids are assigned automatically in draw order. Draw dynamic lists whose item count can change **after** all fixed controls: otherwise the ids of the controls drawn after the list shift and an in-progress Slider/ScrollPanel drag can lose its capture.
-- TextBox, ValueBox, ValueBoxFloat, Spinner and DropdownBox manage their edit/open state internally. Only one text control can be edited at a time: clicking another one commits the previous editor and switches focus, and keyboard input only reaches the active control. Use `GuiIsEditing()` to check whether any text control is being edited.
-- ValueBox and ValueBoxFloat are built on the internal GuiTextBox: the text buffer is kept while editing and the numeric value is parsed only on commit (ENTER, ESCAPE or click outside). Invalid text keeps the previous value; integer values are clamped on commit. This also gives them normal TextBox editing (cursor, selection, clipboard).
+- TextBox, ValueBox, ValueBoxFloat, Spinner and DropdownBox manage their edit/open state internally. Within a context only one text control can be edited at a time: clicking another one commits the previous editor and switches focus, and keyboard input only reaches the active control. Use `GuiIsEditing()` to check whether the current context has a text control being edited. Keyboard input is global, so do not edit text in two contexts simultaneously.
+- ValueBox and ValueBoxFloat are built on the internal GuiTextBox: both keep their text in an internal buffer while editing and parse only on commit (ENTER, ESCAPE or click outside). `GuiValueBoxFloat(bounds, text, float *value)` no longer takes a caller text buffer. Invalid text keeps the previous value; integer values are clamped on commit. This also gives them normal TextBox editing (cursor, selection, clipboard).
 - `GuiSpinner()` is a layout helper built from two Buttons and a ValueBox; the three children own their capture ids independently. While the value box is editing, an arrow click first commits the editor (modal), and the next click steps the value.
 
-Migrating from raygui 5.0: remove `GuiSetCapturedId()`, `GuiPushId()` and `GuiPopId()` calls, wrap the UI in `GuiBeginFromRaylib()`/`GuiEndFromRaylib()` (or `GuiBeginFrame()`/`GuiEndFrame()` for a custom backend), and remove the `editMode` argument from TextBox/ValueBox/ValueBoxFloat/Spinner/DropdownBox calls.
+Migrating from raygui 5.0: remove `GuiSetCapturedId()`, `GuiPushId()` and `GuiPopId()` calls, wrap the UI in `GuiBeginFromRaylib()`/`GuiEndFromRaylib()` (or `GuiBeginFrame()`/`GuiEndFrame()` for a custom backend, or `GuiBegin(inputs, count)`/`GuiEnd()` for explicit inputs), and remove the `editMode` argument from TextBox/ValueBox/ValueBoxFloat/Spinner/DropdownBox calls.
 
 See [examples/scroll_panel](examples/scroll_panel) for overlapping controls and [examples/controls_test_suite](examples/controls_test_suite) for every control.
 For the implementation notes and behaviour matrix, see [docs/control-capture.md](docs/control-capture.md).

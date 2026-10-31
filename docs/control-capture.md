@@ -1,6 +1,6 @@
-# raygui 控件捕获（阶段一实现说明）
+# raygui 控件捕获（阶段一 + 阶段二实现说明）
 
-> 状态：阶段一实现完成，`tests/capture_core_test.c` 通过。
+> 状态：阶段一、阶段二实现完成，`tests/capture_core_test.c` 通过。
 > 日期：2026-10-30
 > 版本：raygui 5.1-dev
 
@@ -12,7 +12,7 @@ raygui 是立即模式 GUI，控件每次绘制时重新求值。多个控件重
 1. 控件按绘制顺序自动分配 ID，业务层不再手动设置。
 2. 按下帧只登记命中，最上层控件成为暂定归属，不执行任何副作用。
 3. 超过拖拽阈值（默认 5px）后按方向仲裁，把捕获转移给第一个支持该方向的命中控件。
-4. 抬起帧只有归属控件可以返回结果；一帧最多一个离散控件触发。
+4. 抬起帧只有归属控件可以返回结果；每个 context 每帧最多一个离散控件触发。
 5. 编辑中的 TextBox、展开的 Dropdown 具有模态捕获，点击外部只结束自身。
 6. hover 只高亮 capture 持有者，或最上层命中控件。
 
@@ -22,33 +22,91 @@ raygui 是立即模式 GUI，控件每次绘制时重新求值。多个控件重
 
 ## 2. 帧 API
 
+三种成对的帧入口：
+
 ```c
-GuiBeginFromRaylib();       // 从 raylib 指针输入取快照并开始一帧
+// 1. 显式输入（回放、网络、自定义后端、测试）
+GuiInput inputs[1] = { { position, pressed, released, down, 0 } };
+GuiBegin(inputs, 1);
 // ... 绘制控件 ...
-GuiEndFromRaylib();         // 帧末结算 tentative/hover
-```
+GuiEnd();
 
-`RAYGUI_STANDALONE` 或自定义输入后端使用低层入口：
+// 2. raylib 适配器（鼠标 + 触摸）
+GuiBeginFromRaylib();
+// ... 绘制控件 ...
+GuiEndFromRaylib();
 
-```c
-GuiBeginFrame();            // 从 GUI_POINTER_POSITION / GUI_BUTTON_* 宏取快照
+// 3. standalone 宏后端
+GuiBeginFrame();
 // ... 绘制控件 ...
 GuiEndFrame();
 ```
 
-阶段二会把 `GuiBeginFrame()` 替换为 `GuiBegin(GuiInput*, int)` 并加入多 context。
-在不调用任何帧入口时，控件仍可绘制，但不会交互。
+`GuiInput`：
+
+```c
+typedef struct GuiInput {
+    Vector2 position;   // 当前位置
+    bool pressed;       // 本帧刚按下
+    bool released;      // 本帧刚松开
+    bool down;          // 持续按住
+    int touchId;        // 0 = 鼠标/主指，1..N = 其他触摸
+} GuiInput;
+```
+
+`GuiBegin()` 会拷贝本帧输入。默认 context 只使用第一个 input；多余触摸忽略。
+
+### 2.1 多 context
+
+```c
+GuiContext left = { 0 };
+GuiContext right = { 0 };
+
+GuiBegin(inputs, 2);
+
+GuiPushContext(&left, leftBounds);    // 从 leftBounds 内的未分配触摸中选一个
+DrawLeftUI();
+GuiPopContext();
+
+GuiPushContext(&right, rightBounds);
+DrawRightUI();
+GuiPopContext();
+
+GuiEnd();
+```
+
+约束：
+
+- context 平级，`GuiPushContext` 不允许嵌套；
+- 不 Push 时使用内置默认 context，单指场景零侵入；
+- 一次 Push 只为一个 context 路由一个 touchId，route 后跨帧保持，移出 bounds 也不重新分配；
+- 已被某 context 路由/捕获的触摸不会再传给兄弟 context；
+- 触摸释放后该 context 释放路由，下一帧可重新分配；
+- 持有触摸的 context 必须继续每帧 Push；删除 context 前调用 `GuiCancel()`，否则触摸归属会残留。
+- 调用方负责在 Push 前后自行设置裁剪区域，`bounds` 只用于输入路由，且使用全局坐标。
+
+控制接口：
+
+```c
+void GuiCancel(GuiContext *ctx);        // 静默清零交互状态，不触发任何控件
+void GuiReleaseCapture(GuiContext *ctx); // 只释放 capture，不触发
+void GuiSetDragThreshold(float px);     // 默认 5px
+float GuiGetDragThreshold(void);
+```
+
+`ctx == NULL` 时 `GuiCancel/GuiReleaseCapture` 作用于当前 context。窗口失焦、context 销毁时调用
+`GuiCancel()`；不要把“松手”模拟成 Cancel。
 
 查询接口：
 
 ```c
-unsigned int GuiGetCapturedId(void);   // press 帧返回 tentative，确认后返回 captured，空闲为 0
-bool GuiIsEditing(void);               // 当前是否有文本控件正在编辑
+unsigned int GuiGetCapturedId(void);   // 当前 context：press 帧返回 tentative，确认后返回 captured，空闲为 0
+bool GuiIsEditing(void);               // 当前 context 是否有文本控件正在编辑
 ```
 
 ## 3. 状态机
 
-核心状态位于 `src/raygui.h` 的 `GuiCaptureState`（阶段二迁入 `GuiContext`）：
+核心状态位于 `src/raygui.h` 的 `GuiContext`（每 context 一份）：
 
 | 字段 | 含义 |
 |---|---|
@@ -62,6 +120,8 @@ bool GuiIsEditing(void);               // 当前是否有文本控件正在编�
 | `editId` | 当前文本编辑控件 ID，单编辑焦点的唯一事实来源 |
 | `dropdownOpenId` | 当前展开的 Dropdown ID |
 | `commitId` | 外部点击产生的待提交标记，在抬起帧交付 |
+| `inputs` / `activeInput` | 本 context 可见输入与当前驱动输入 |
+| `hasTouch` / `touchId` / `bounds` | 多 context 路由状态与作用域范围 |
 
 帧边界行为：
 
@@ -103,8 +163,9 @@ release 帧的返回规则：
   - Enter/ESC 当帧提交并返回 `RESULT_PRESSED`。
   - 编辑中点击外部：press 帧清 `editId`、设置 commit 标记，release 帧返回提交结果，
     底层控件不触发。
-  - **同一时刻只有一个文本控件拥有编辑态**：点击另一个 TextBox/ValueBox 会提交旧焦点并切换；
-    键盘输入只送当前编辑控件。业务层可用 `GuiIsEditing()` 查询是否有文本正在编辑。
+  - **同一 context 内只有一个文本控件拥有编辑态**：点击另一个 TextBox/ValueBox 会提交旧焦点并切换；
+    键盘输入只送当前编辑控件。业务层可用 `GuiIsEditing()` 查询当前 context 是否有文本正在编辑。
+    键盘输入是全局的，不要让两个 context 同时编辑文本。
   - **Spinner 只是布局辅助**：由两个 `GuiButton` 和一个内部 `GuiValueBox` 组成，三者各自持有
     capture ID，Spinner 本身不额外 `GuiControlBegin`。编辑中点箭头：第一次只提交（模态），
     第二次才步进。点击 Spinner 中间仍会从其他 TextBox 抢占编辑焦点。
@@ -150,7 +211,7 @@ GuiEndFromRaylib();
 - 两个 TextBox 同时存在时只有一个接收键盘输入，点击另一个会提交旧焦点并切换；
 - ValueBox/Spinner 的内部编辑与提交；
 - ValueBox 输入期间不修改值、提交时才 parse/clamp，非法文本保留原值；
-- Spinner 内部 ValueBox 编辑、Enter 提交、箭头步进，以及编辑中点箭头“提交 + 步进”；
+- Spinner 内部 ValueBox 编辑、Enter 提交、箭头步进；编辑中点箭头第一次只提交，第二次步进；
 - Spinner 从 TextBox 抢占编辑焦点；
 - 两个 Spinner 同时存在时只有一个接收输入，点击另一个会切换焦点；
 - Dropdown 展开/选中/外部关闭；`GuiLock()` 时冻结，解锁后正常关闭；
@@ -158,14 +219,21 @@ GuiEndFromRaylib();
 - ComboBox selector 仍可翻页；
 - ScrollPanel 滚轮与返回值；
 - `GuiGrid` 不产生离散触发；
-- 一帧最多一个离散控件触发。
+- 一个 context 每帧最多一个离散控件触发；多个平级 context 可同帧各自触发。
+- `GuiBegin(GuiInput*, int)` 显式输入点击；
+- 两个平级 context 分别接收独立 touchId，同帧各自触发；
+- context 捕获后触摸移出 bounds 仍继续更新，且不重路由给兄弟 context；
+- 已被右侧 context 路由的触摸不会被先 Push 的左侧 context 抢走；
+- 默认 context 只使用第一个 input，忽略多余触摸；
+- `GuiCancel` / `GuiReleaseCapture` 不触发控件；
+- context 内取消后可重新 Push，不破坏帧链表；缺失 touch release 时自动清理路由；
+- `GuiSetDragThreshold` / `GuiGetDragThreshold` 运行时配置。
 
 构建与运行：
 
 ```powershell
-cmake -S projects/CMake -B build -DBUILD_RAYGUI_TESTS=ON
-cmake --build build
-ctest --test-dir build --output-on-failure
+build.bat
+build\capture_core_test.exe
 ```
 
 或直接：
@@ -175,14 +243,14 @@ gcc -std=c99 -I src tests/capture_core_test.c -o capture_core_test.exe
 ./capture_core_test.exe
 ```
 
-## 8. 已知限制（阶段一）
+## 8. 已知限制
 
 - hover 有一帧延迟（立即模式无法预知后绘制控件）。
 - 同帧 press+release 不合成点击。
 - 未调用帧入口时控件只绘制、不交互，并在首次调用时输出警告。
-- 阶段一尚无 `GuiCancel/GuiReleaseCapture/GuiSetDragThreshold`，阈值固定 5px；
-  多 context/多指路由在阶段二提供。
-- 触摸输入仍通过 raylib 主指针宏读取，阶段二改为 `GuiInput` 注入。
+- context 被 Push 时必须显式 Pop；遗漏时帧末仍会结算该 context，但建议严格配对。
+- 键盘输入仍是全局 raylib 宏，`GuiInput` 目前抽象指针/触摸；多 context 同时编辑文本不在支持范围。
+- context 的 `bounds` 只用于输入路由，不自动设置裁剪区域。
 
 ## 9. 变更文件
 
@@ -192,3 +260,4 @@ gcc -std=c99 -I src tests/capture_core_test.c -o capture_core_test.exe
 - `tests/capture_core_test.c`
 - `tests/CMakeLists.txt`
 - `examples/*`（帧 API、自动 ID、内部编辑态迁移）
+- `raygui_capture_design.md`

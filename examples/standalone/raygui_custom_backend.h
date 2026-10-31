@@ -52,11 +52,11 @@ static Vector2 GetMousePosition(void)
     return position;
 }
 
-static int GetMouseWheelMove(void)
+static float GetMouseWheelMove(void)
 {
     // TODO: Mouse wheel movement variation, reseted every frame
     
-    return 0;
+    return 0.0f;
 }
 
 static bool IsMouseButtonDown(int button)

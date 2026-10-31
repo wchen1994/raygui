@@ -1,6 +1,6 @@
 /*******************************************************************************************
 *
-*   raygui - Control capture core headless tests (phase 1)
+*   raygui - Control capture core headless tests (phase 1 + phase 2)
 *
 *   Uses RAYGUI_STANDALONE with a deterministic fake input backend to verify:
 *       - automatic ids and topmost hit capture
@@ -9,6 +9,8 @@
 *       - hover ownership (topmost hit, capture holder)
 *       - modal interception for text boxes and dropdowns
 *       - one discrete control trigger per frame
+*       - explicit GuiInput injection, sibling contexts and touch routing
+*       - GuiCancel / GuiReleaseCapture / runtime drag threshold
 *
 *   LICENSE: zlib/libpng
 *
@@ -624,6 +626,67 @@ static void TestValueBoxParseOnCommit(void)
     CHECK(gValue == 10, "invalid text keeps the previous value on commit");
 }
 
+static float gFloatValue = 1.5f;
+static int gFloatResult = RESULT_NONE;
+
+static void DrawFloatValueBoxOnly(void)
+{
+    gFloatResult = GuiValueBoxFloat(RAYGUI_CLITERAL(Rectangle){ 0, 0, 120, 30 }, NULL, &gFloatValue);
+}
+
+static void TestValueBoxFloat(void)
+{
+    ResetGui();
+    gFloatValue = 1.5f;
+    gFloatResult = RESULT_NONE;
+
+    PressRelease(RAYGUI_CLITERAL(Vector2){ 110, 10 }, DrawFloatValueBoxOnly);
+    CHECK(GuiIsEditing(), "float value box enters edit mode");
+
+    gCharPressed = '2';
+    Begin(RAYGUI_CLITERAL(Vector2){ 110, 10 }, false, false, false);
+    DrawFloatValueBoxOnly();
+    End();
+    gCharPressed = 0;
+
+    CHECK(gFloatValue == 1.5f, "float value is not parsed while typing");
+
+    gKeyPressed = KEY_ENTER;
+    Begin(RAYGUI_CLITERAL(Vector2){ 110, 10 }, false, false, false);
+    DrawFloatValueBoxOnly();
+    End();
+    gKeyPressed = 0;
+
+    CHECK(gFloatValue == 1.52f, "float value is parsed on commit");
+    CHECK(gFloatResult == RESULT_PRESSED, "float value box returns the commit result");
+
+    // Invalid text keeps the previous value
+    PressRelease(RAYGUI_CLITERAL(Vector2){ 110, 10 }, DrawFloatValueBoxOnly);
+
+    for (int i = 0; i < 4; i++)
+    {
+        gKeyPressed = KEY_BACKSPACE;
+        Begin(RAYGUI_CLITERAL(Vector2){ 110, 10 }, false, false, false);
+        DrawFloatValueBoxOnly();
+        End();
+    }
+    gKeyPressed = 0;
+
+    gCharPressed = 'x';
+    Begin(RAYGUI_CLITERAL(Vector2){ 110, 10 }, false, false, false);
+    DrawFloatValueBoxOnly();
+    End();
+    gCharPressed = 0;
+
+    gKeyPressed = KEY_ENTER;
+    Begin(RAYGUI_CLITERAL(Vector2){ 110, 10 }, false, false, false);
+    DrawFloatValueBoxOnly();
+    End();
+    gKeyPressed = 0;
+
+    CHECK(gFloatValue == 1.52f, "invalid float text keeps the previous value");
+}
+
 static void TestDropdownModal(void)
 {
     ResetGui();
@@ -1043,6 +1106,346 @@ static void TestOneDiscreteTriggerPerFrame(void)
     CHECK((gUpperClicks == 1) && (gLowerClicks == 0), "only the captured control returns a discrete result");
 }
 
+//----------------------------------------------------------------------------------
+// Phase 2: explicit input, contexts and routing
+//----------------------------------------------------------------------------------
+
+static int gCtxClicksA = 0;
+static int gCtxClicksB = 0;
+static int gCtxSliderResult = RESULT_NONE;
+static float gCtxSliderValue = 0.0f;
+
+static void DrawCtxButtonA(void)
+{
+    if (GuiButton(RAYGUI_CLITERAL(Rectangle){ 10, 10, 60, 30 }, "A")) gCtxClicksA++;
+}
+
+static void DrawCtxButtonB(void)
+{
+    if (GuiButton(RAYGUI_CLITERAL(Rectangle){ 210, 10, 60, 30 }, "B")) gCtxClicksB++;
+}
+
+static void DrawCtxLeftSlider(void)
+{
+    gCtxSliderResult = GuiSlider(RAYGUI_CLITERAL(Rectangle){ 10, 10, 80, 20 }, NULL, NULL, &gCtxSliderValue, 0.0f, 1.0f);
+}
+
+static void DrawCtxRightButton(void)
+{
+    if (GuiButton(RAYGUI_CLITERAL(Rectangle){ 120, 10, 60, 30 }, "B")) gCtxClicksB++;
+}
+
+static void DrawCtxRightSlider(void)
+{
+    gCtxSliderResult = GuiSlider(RAYGUI_CLITERAL(Rectangle){ 120, 10, 80, 20 }, NULL, NULL, &gCtxSliderValue, 0.0f, 1.0f);
+}
+
+static void DrawTwoContexts(GuiContext *left, GuiContext *right, bool slider)
+{
+    GuiPushContext(left, RAYGUI_CLITERAL(Rectangle){ 0, 0, 100, 100 });
+    if (slider) DrawCtxLeftSlider();
+    else DrawCtxButtonA();
+    GuiPopContext();
+
+    GuiPushContext(right, RAYGUI_CLITERAL(Rectangle){ 100, 0, 200, 100 });
+    DrawCtxRightButton();
+    GuiPopContext();
+}
+
+static void TestExplicitInputClick(void)
+{
+    ResetGui();
+    gButtonClicks = 0;
+
+    GuiInput input = { { 10, 10 }, true, false, true, 0 };
+    GuiBegin(&input, 1);
+    DrawSingleButton();
+    GuiEnd();
+
+    input.pressed = false;
+    GuiBegin(&input, 1);
+    DrawSingleButton();
+    GuiEnd();
+
+    input.released = true;
+    input.down = false;
+    GuiBegin(&input, 1);
+    DrawSingleButton();
+    GuiEnd();
+
+    CHECK(gButtonClicks == 1, "GuiBegin() click is delivered on release");
+}
+
+static void TestMultiContextIndependentTouches(void)
+{
+    ResetGui();
+    GuiContext left = { 0 };
+    GuiContext right = { 0 };
+    gCtxClicksA = 0;
+    gCtxClicksB = 0;
+    gCtxSliderValue = 0.2f;
+
+    GuiInput inputs[2] = {
+        { { 20, 20 }, true, false, true, 0 },
+        { { 140, 20 }, true, false, true, 1 }
+    };
+
+    GuiBegin(inputs, 2);
+    DrawTwoContexts(&left, &right, false);
+    GuiEnd();
+
+    inputs[0].pressed = false;
+    inputs[1].pressed = false;
+    GuiBegin(inputs, 2);
+    DrawTwoContexts(&left, &right, false);
+    GuiEnd();
+
+    inputs[0].down = false;
+    inputs[0].released = true;
+    inputs[1].down = false;
+    inputs[1].released = true;
+    GuiBegin(inputs, 2);
+    DrawTwoContexts(&left, &right, false);
+    GuiEnd();
+
+    CHECK(gCtxClicksA == 1, "left context receives its own touch");
+    CHECK(gCtxClicksB == 1, "right context receives its own touch");
+}
+
+static void TestContextCaptureStaysRouted(void)
+{
+    ResetGui();
+    GuiContext left = { 0 };
+    GuiContext right = { 0 };
+    gCtxClicksA = 0;
+    gCtxClicksB = 0;
+    gCtxSliderValue = 0.2f;
+
+    GuiInput inputs[1] = { { { 20, 15 }, true, false, true, 0 } };
+
+    GuiBegin(inputs, 1);
+    DrawTwoContexts(&left, &right, true);
+    GuiEnd();
+
+    // Move outside the left context bounds but keep holding the touch
+    inputs[0].position = RAYGUI_CLITERAL(Vector2){ 150, 15 };
+    inputs[0].pressed = false;
+    GuiBegin(inputs, 1);
+    DrawTwoContexts(&left, &right, true);
+    GuiEnd();
+
+    CHECK(gCtxSliderValue > 0.2f, "context keeps updating while the touch leaves its bounds");
+
+    inputs[0].down = false;
+    inputs[0].released = true;
+    GuiBegin(inputs, 1);
+    DrawTwoContexts(&left, &right, true);
+    GuiEnd();
+
+    CHECK(gCtxClicksB == 0, "a captured touch is not rerouted to another context");
+}
+
+static void TestContextCaptureNotStolenByEarlierPush(void)
+{
+    ResetGui();
+    GuiContext left = { 0 };
+    GuiContext right = { 0 };
+    gCtxClicksA = 0;
+    gCtxSliderValue = 0.2f;
+
+    // The right context captures the touch first
+    GuiInput input = { { 150, 15 }, true, false, true, 0 };
+
+    GuiBegin(&input, 1);
+    GuiPushContext(&right, RAYGUI_CLITERAL(Rectangle){ 100, 0, 200, 100 });
+    DrawCtxRightSlider();
+    GuiPopContext();
+    GuiEnd();
+
+    // Next frame the touch moves into the left bounds. Left is pushed first, but must not steal it.
+    input.position = RAYGUI_CLITERAL(Vector2){ 50, 15 };
+    input.pressed = false;
+
+    GuiBegin(&input, 1);
+    GuiPushContext(&left, RAYGUI_CLITERAL(Rectangle){ 0, 0, 100, 100 });
+    DrawCtxButtonA();
+    GuiPopContext();
+
+    GuiPushContext(&right, RAYGUI_CLITERAL(Rectangle){ 100, 0, 200, 100 });
+    DrawCtxRightSlider();
+    GuiPopContext();
+    GuiEnd();
+
+    input.down = false;
+    input.released = true;
+    GuiBegin(&input, 1);
+    GuiPushContext(&left, RAYGUI_CLITERAL(Rectangle){ 0, 0, 100, 100 });
+    DrawCtxButtonA();
+    GuiPopContext();
+
+    GuiPushContext(&right, RAYGUI_CLITERAL(Rectangle){ 100, 0, 200, 100 });
+    DrawCtxRightSlider();
+    GuiPopContext();
+    GuiEnd();
+
+    CHECK(gCtxClicksA == 0, "a routed touch is not stolen by an earlier sibling context");
+    CHECK(gCtxSliderValue != 0.2f, "the owning context keeps updating the touch");
+}
+
+static void TestCancelAndReleaseCapture(void)
+{
+    ResetGui();
+    gButtonClicks = 0;
+
+    // Press then cancel: release must not trigger
+    Begin(RAYGUI_CLITERAL(Vector2){ 10, 10 }, true, true, false);
+    DrawSingleButton();
+    End();
+    GuiCancel(NULL);
+
+    CHECK(GuiGetCapturedId() == 0, "GuiCancel() clears the capture");
+
+    Begin(RAYGUI_CLITERAL(Vector2){ 10, 10 }, false, false, true);
+    DrawSingleButton();
+    End();
+
+    CHECK(gButtonClicks == 0, "GuiCancel() prevents the release from triggering");
+
+    // Press then release capture explicitly: release must not trigger either
+    Begin(RAYGUI_CLITERAL(Vector2){ 10, 10 }, true, true, false);
+    DrawSingleButton();
+    End();
+    GuiReleaseCapture(NULL);
+
+    Begin(RAYGUI_CLITERAL(Vector2){ 10, 10 }, false, false, true);
+    DrawSingleButton();
+    End();
+
+    CHECK(gButtonClicks == 0, "GuiReleaseCapture() prevents the release from triggering");
+
+    // Cancel also clears text editing, leaving the buffer untouched
+    ResetGui();
+    strcpy(gTextBoxText, "abc");
+    PressRelease(RAYGUI_CLITERAL(Vector2){ 10, 10 }, DrawTextBoxOnly);
+    CHECK(GuiIsEditing(), "text box is editing before cancel");
+
+    GuiCancel(NULL);
+    CHECK(!GuiIsEditing(), "GuiCancel() clears the text editor");
+    CHECK(strcmp(gTextBoxText, "abc") == 0, "GuiCancel() leaves the text buffer untouched");
+}
+
+static void TestDragThresholdConfig(void)
+{
+    ResetGui();
+    gSliderValue = 0.2f;
+    gSliderResult = RESULT_NONE;
+
+    float previous = GuiGetDragThreshold();
+    GuiSetDragThreshold(20.0f);
+    CHECK(GuiGetDragThreshold() == 20.0f, "drag threshold can be queried");
+
+    Begin(RAYGUI_CLITERAL(Vector2){ 20, 15 }, true, true, false);
+    DrawSliderOnly();
+    End();
+
+    // 10 px movement is below the configured 20 px threshold
+    Begin(RAYGUI_CLITERAL(Vector2){ 30, 15 }, true, false, false);
+    DrawSliderOnly();
+    End();
+
+    CHECK(gSliderValue == 0.2f, "movement below the configured threshold does not drag");
+
+    Begin(RAYGUI_CLITERAL(Vector2){ 30, 15 }, false, false, true);
+    DrawSliderOnly();
+    End();
+
+    GuiSetDragThreshold(previous);
+}
+
+static void TestDefaultContextIgnoresExtraInputs(void)
+{
+    ResetGui();
+    gCtxClicksA = 0;
+
+    GuiInput inputs[2] = {
+        { { 10, 60 }, true, false, true, 0 },
+        { { 20, 20 }, true, false, true, 1 }
+    };
+
+    GuiBegin(inputs, 2);
+    DrawCtxButtonA();
+    GuiEnd();
+
+    inputs[0].pressed = false;
+    inputs[1].pressed = false;
+    GuiBegin(inputs, 2);
+    DrawCtxButtonA();
+    GuiEnd();
+
+    inputs[0].down = false;
+    inputs[0].released = true;
+    inputs[1].down = false;
+    inputs[1].released = true;
+    GuiBegin(inputs, 2);
+    DrawCtxButtonA();
+    GuiEnd();
+
+    CHECK(gCtxClicksA == 0, "default context only uses the first input");
+}
+
+static void TestContextCancelInsideFrame(void)
+{
+    ResetGui();
+    GuiContext ctx = { 0 };
+    gCtxClicksA = 0;
+
+    GuiInput input = { { 20, 20 }, true, false, true, 0 };
+
+    GuiBegin(&input, 1);
+    GuiPushContext(&ctx, RAYGUI_CLITERAL(Rectangle){ 0, 0, 100, 100 });
+    DrawCtxButtonA();
+    GuiPopContext();
+
+    GuiCancel(&ctx);
+
+    // The same context can be pushed again in the same frame; it must not corrupt the frame list
+    GuiPushContext(&ctx, RAYGUI_CLITERAL(Rectangle){ 0, 0, 100, 100 });
+    DrawCtxButtonA();
+    GuiPopContext();
+    GuiEnd();
+
+    CHECK(gCtxClicksA == 0, "cancelled press does not deliver a click");
+}
+
+static void TestContextMissingRelease(void)
+{
+    ResetGui();
+    GuiContext ctx = { 0 };
+    gCtxSliderValue = 0.2f;
+
+    GuiInput input = { { 20, 15 }, true, false, true, 0 };
+
+    GuiBegin(&input, 1);
+    GuiPushContext(&ctx, RAYGUI_CLITERAL(Rectangle){ 0, 0, 100, 100 });
+    DrawCtxLeftSlider();
+    GuiPopContext();
+    GuiEnd();
+
+    // No input at all: the routed touch is treated as released instead of sticking forever
+    GuiBegin(NULL, 0);
+    GuiPushContext(&ctx, RAYGUI_CLITERAL(Rectangle){ 0, 0, 100, 100 });
+    DrawCtxLeftSlider();
+    GuiPopContext();
+    GuiEnd();
+
+    GuiBegin(NULL, 0);
+    GuiPushContext(&ctx, RAYGUI_CLITERAL(Rectangle){ 0, 0, 100, 100 });
+    DrawCtxLeftSlider();
+    CHECK(GuiGetCapturedId() == 0, "missing touch release clears the context capture");
+    GuiPopContext();
+    GuiEnd();
+}
+
 int main(void)
 {
     GuiLoadStyleDefault();
@@ -1062,6 +1465,7 @@ int main(void)
     TestTextBoxExclusiveInput();
     TestValueBox();
     TestValueBoxParseOnCommit();
+    TestValueBoxFloat();
     TestSpinnerValueBox();
     TestSpinnerArrowWhileEditing();
     TestSpinnerTakesFocusFromTextBox();
@@ -1073,6 +1477,15 @@ int main(void)
     TestScrollPanelWheel();
     TestGridDoesNotTrigger();
     TestOneDiscreteTriggerPerFrame();
+    TestExplicitInputClick();
+    TestMultiContextIndependentTouches();
+    TestContextCaptureStaysRouted();
+    TestContextCaptureNotStolenByEarlierPush();
+    TestCancelAndReleaseCapture();
+    TestDragThresholdConfig();
+    TestDefaultContextIgnoresExtraInputs();
+    TestContextCancelInsideFrame();
+    TestContextMissingRelease();
 
     printf("%d checks, %d failures\n", gChecks, gFailures);
     return (gFailures == 0)? 0 : 1;

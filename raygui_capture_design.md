@@ -1,12 +1,11 @@
 # raygui CONTROL CAPTURE 设计文档
 
-> **落地状态（2026-10-30）**
-> - 阶段一（Capture 核心）已实现：自动 ID、hitStack、两阶段 capture、方向仲裁、hover、模态拦截、
->   一帧一个离散触发、内部单编辑焦点（`editId`，无业务侧 editMode 变量）。
-> - 阶段一帧入口为 `GuiBeginFromRaylib()` / `GuiEndFromRaylib()`（适配器）和
->   `GuiBeginFrame()` / `GuiEndFrame()`（低层）；阶段二将把低层那对替换为
->   `GuiBegin(GuiInput*, int)` / `GuiEnd()`，并加入 `GuiContext`、多指路由、
->   `GuiCancel` / `GuiReleaseCapture` / `GuiSetDragThreshold`。
+> **落地状态（2026-10-31）**
+> - 阶段一 + 阶段二均已落地：自动 ID、hitStack、两阶段 capture、方向仲裁、hover、模态拦截、
+>   每个 context 每帧一个离散触发、内部单编辑焦点（`editId`），以及 `GuiInput` 注入、
+>   平级 `GuiContext`、多指路由、`GuiCancel` / `GuiReleaseCapture` / `GuiSetDragThreshold`。
+> - 阶段二保留 `GuiBeginFrame()`/`GuiEndFrame()` 作为宏输入便捷入口，新增
+>   `GuiBegin(GuiInput*, int)` / `GuiEnd()`。
 > - 阶段一实现说明见 `docs/control-capture.md`。
 > - 与本文冲突处，以本状态与 `docs/control-capture.md` 为准（见 5.7、5.11）。
 
@@ -24,7 +23,7 @@
 - **超过 drag threshold 后**：方向仲裁确认归属（capturedId）。
 - **release 帧**：仅归属控件可触发。
 - **hitStack 每帧构建**（每个控件命中时 push），用于 hover 判定；**press 帧构建的那份额外用于方向仲裁**；capture 状态跨帧保留。
-- **一帧最多一个离散控件触发。**
+- **每个 context 每帧最多一个离散控件触发。**
 
 ### 2.2 ID 规则
 
@@ -155,7 +154,7 @@ GuiEnd();
 |------|------|
 | 某指已被某 context capture | 该指只路由给这个 context，不传递给其他 context |
 | 某指未被任何 context capture | 按 `GuiPushContext` 调用顺序尝试，命中 bounds 的 context 捕获该指 |
-| 单 context | 只处理第一个被 captured 的 touchId，其余忽略 |
+| 单 context | 只处理第一个 `GuiInput`，其余忽略 |
 | 多指并发（左摇杆 + 右按钮） | 拆两个平级 context，每个接收独立的 touchId，各自独立走完整 capture 流程 |
 
 **capture 建立后不重新路由该 touchId。** context 是隔离单元，不是并发单元；并发靠数量解决。
@@ -194,7 +193,7 @@ float GuiGetDragThreshold(void);              // 查询当前 threshold
 
 ## 四、核心要素（≤30 行）
 
-1. **核心契约**：`if(GuiXXX())` 通过 = 业务层获得合法修改权，一帧最多一个离散控件触发。
+1. **核心契约**：`if(GuiXXX())` 通过 = 业务层获得合法修改权，每个 context 每帧最多一个离散控件触发。
 2. **两阶段 Capture**：press 帧暂定捕获 + 构建命中栈；超过 drag threshold 后方向仲裁确认归属；release 帧仅归属控件触发。
 3. **hitStack 每帧构建**（用于 hover），press 帧那份额外用于仲裁；capture 状态跨帧保留。
 4. **ID 自增**：GUI 内部每帧递增计数器自动分配，帧首重置；调用顺序固定则 ID 稳定；PushId/PopId 不暴露。
@@ -302,8 +301,8 @@ float GuiGetDragThreshold(void);              // 查询当前 threshold
   底层控件不触发。
 - Enter / ESC：当帧提交并返回 `RESULT_PRESSED`（不存在对应的 release 事件）。
 - buffer 全程由 GUI 直接写，业务层自己保留原值用于回滚；Cancel 时 GUI 清 `editId`。
-- **同一时刻只有一个文本控件拥有编辑态**：点击另一个控件会提交旧焦点并切换；键盘输入只送当前
-  编辑控件。业务层用 `GuiIsEditing()` 查询是否有文本正在编辑。
+- **同一 context 内同一时刻只有一个文本控件拥有编辑态**：点击另一个控件会提交旧焦点并切换；
+  键盘输入只送当前编辑控件。键盘输入仍是全局的，多 context 同时编辑文本不在支持范围。
 - **Spinner 只是布局辅助**：由两个 Button 和一个内部 ValueBox 组成，三者各自持有 capture ID，
   Spinner 本身不调用 `GuiControlBegin`。编辑中点箭头第一次只提交（模态），第二次才步进。
 - **ValueBox / ValueBoxFloat 复用内部 GuiTextBox**：编辑期间保留文本 buffer，提交时才 parse
@@ -330,7 +329,8 @@ float GuiGetDragThreshold(void);              // 查询当前 threshold
 **怎么改**：
 - 新增 `GuiCancel(ctx)`：清零该 context 的 capturedId / tentativeId / hoverId / dragDirection / isConfirmed / editId / dropdownOpenId；不触发任何控件。
 - `GuiEnd` 或平台层检测到窗口失焦时调用 `GuiCancel`，而非模拟 touch up。
-- `GuiPopContext` 销毁 context 前也调 `GuiCancel`。
+- context 被真正销毁（不再复用）前，调用方应主动 `GuiCancel(ctx)`；`GuiPopContext` 只退出
+  作用域，保留 capture 以便下一帧继续。
 
 **影响范围**：新增 1 个公共 API；平台集成层需挂接失焦事件。
 
@@ -350,7 +350,7 @@ float GuiGetDragThreshold(void);              // 查询当前 threshold
 **阶段一已落地：**
 
 ```c
-// 帧 / 输入（阶段一过渡入口，阶段二把 Frame 那对替换为 GuiBegin/GuiEnd）
+// 帧 / 输入（宏输入便捷入口，保留）
 void GuiBeginFrame(void);
 void GuiEndFrame(void);
 void GuiBeginFromRaylib(void);
@@ -364,12 +364,12 @@ unsigned int GuiGetCapturedId(void);
 bool GuiIsEditing(void);
 int GuiTextBox(..., char *text, int textSize);
 int GuiValueBox(..., int *value, int minValue, int maxValue);
-int GuiValueBoxFloat(..., char *textValue, float *value);
+int GuiValueBoxFloat(..., float *value);
 int GuiSpinner(..., int *value, int minValue, int maxValue);
 int GuiDropdownBox(..., int *active);
 ```
 
-**阶段二计划：**
+**阶段二已落地：**
 
 ```c
 void GuiBegin(GuiInput* inputs, int inputCount);
