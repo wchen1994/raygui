@@ -631,7 +631,12 @@ static int gFloatResult = RESULT_NONE;
 
 static void DrawFloatValueBoxOnly(void)
 {
-    gFloatResult = GuiValueBoxFloat(RAYGUI_CLITERAL(Rectangle){ 0, 0, 120, 30 }, NULL, &gFloatValue);
+    gFloatResult = GuiValueBoxFloat(RAYGUI_CLITERAL(Rectangle){ 0, 0, 120, 30 }, NULL, &gFloatValue, 0.0f, 0.0f);
+}
+
+static void DrawFloatValueBoxRange(void)
+{
+    gFloatResult = GuiValueBoxFloat(RAYGUI_CLITERAL(Rectangle){ 0, 0, 120, 30 }, NULL, &gFloatValue, 0.0f, 2.0f);
 }
 
 static void TestValueBoxFloat(void)
@@ -685,6 +690,65 @@ static void TestValueBoxFloat(void)
     gKeyPressed = 0;
 
     CHECK(gFloatValue == 1.52f, "invalid float text keeps the previous value");
+}
+
+static int gUnboundedValue = 500;
+
+static void DrawUnboundedValueBox(void)
+{
+    gValueResult = GuiValueBox(RAYGUI_CLITERAL(Rectangle){ 0, 0, 120, 30 }, NULL, &gUnboundedValue, 0, 0);
+}
+
+static void TestValueBoxLimits(void)
+{
+    ResetGui();
+    gFloatValue = 5.0f;
+
+    // maxValue > minValue: external values and commits are clamped
+    Begin(RAYGUI_CLITERAL(Vector2){ 110, 10 }, false, false, false);
+    DrawFloatValueBoxRange();
+    End();
+    CHECK(gFloatValue == 2.0f, "float value box clamps external values when a range is set");
+
+    gFloatValue = 1.0f;
+    PressRelease(RAYGUI_CLITERAL(Vector2){ 110, 10 }, DrawFloatValueBoxRange);
+
+    gCharPressed = '5';
+    Begin(RAYGUI_CLITERAL(Vector2){ 110, 10 }, false, false, false);
+    DrawFloatValueBoxRange();
+    End();
+    gCharPressed = 0;
+
+    gKeyPressed = KEY_ENTER;
+    Begin(RAYGUI_CLITERAL(Vector2){ 110, 10 }, false, false, false);
+    DrawFloatValueBoxRange();
+    End();
+    gKeyPressed = 0;
+
+    CHECK(gFloatValue == 2.0f, "float value box clamps on commit");
+
+    // maxValue <= minValue: no range limit for int ValueBox
+    ResetGui();
+    gUnboundedValue = 500;
+    Begin(RAYGUI_CLITERAL(Vector2){ 110, 10 }, false, false, false);
+    DrawUnboundedValueBox();
+    End();
+    CHECK(gUnboundedValue == 500, "value box keeps out-of-range values when maxValue <= minValue");
+
+    PressRelease(RAYGUI_CLITERAL(Vector2){ 110, 10 }, DrawUnboundedValueBox);
+    gCharPressed = '1';
+    Begin(RAYGUI_CLITERAL(Vector2){ 110, 10 }, false, false, false);
+    DrawUnboundedValueBox();
+    End();
+    gCharPressed = 0;
+
+    gKeyPressed = KEY_ENTER;
+    Begin(RAYGUI_CLITERAL(Vector2){ 110, 10 }, false, false, false);
+    DrawUnboundedValueBox();
+    End();
+    gKeyPressed = 0;
+
+    CHECK(gUnboundedValue == 5001, "value box does not clamp on commit when maxValue <= minValue");
 }
 
 static void TestDropdownModal(void)
@@ -1466,6 +1530,7 @@ int main(void)
     TestValueBox();
     TestValueBoxParseOnCommit();
     TestValueBoxFloat();
+    TestValueBoxLimits();
     TestSpinnerValueBox();
     TestSpinnerArrowWhileEditing();
     TestSpinnerTakesFocusFromTextBox();

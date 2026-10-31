@@ -1,6 +1,6 @@
 /*******************************************************************************************
 *
-*   raygui v5.0 - A simple and easy-to-use immediate-mode gui library
+*   raygui v5.1 - A simple and easy-to-use immediate-mode gui library
 *
 *   DESCRIPTION:
 *       raygui is a tools-dev-focused immediate-mode-gui library based on raylib but also
@@ -139,14 +139,16 @@
 *             after the drag threshold (default 5 px); the direction arbitration then
 *             transfers the capture to the first hit control that supports that direction.
 *           - A control that owns the capture keeps it even when the pointer leaves its
-*             bounds; release still triggers it. GuiGetCapturedId() reports the active id.
+*             bounds. A discrete control released outside its bounds is cancelled; a
+*             continuous drag may finish outside. GuiGetCapturedId() reports the active id.
 *           - Hover is resolved from the previous frame hit stack: without capture only the
 *             topmost hit control is highlighted, with capture only the capture holder.
 *           - Editing controls are modal: a TextBox being edited or an expanded Dropdown
 *             consumes the press outside itself and does not activate the controls below.
-*           - Only one discrete control can return a result per frame.
-*           - Control ids are not exposed: call order is stable when the UI layout is
-*             stable; dynamic lists should keep a stable draw order or use ScrollPanel.
+*           - Each context can return one discrete control result per frame.
+*           - Control ids are internal and assigned in draw order. Draw dynamic lists whose
+*             item count can change after all fixed controls, otherwise later ids shift and
+*             an in-progress drag can lose its capture.
 *
 *   CONFIGURATION:
 *       #define RAYGUI_IMPLEMENTATION
@@ -181,7 +183,7 @@
 *                         ADDED: Per-frame hit stack and direction arbitration (5 px drag threshold)
 *                         ADDED: Hover ownership (topmost hit / capture holder)
 *                         ADDED: Modal interception for TextBox and DropdownBox
-*                         ADDED: One discrete control result per frame
+*                         ADDED: One discrete control result per context per frame
 *                         ADDED: Paired frame API: GuiBeginFrame()/GuiEndFrame() and
 *                                GuiBeginFromRaylib()/GuiEndFromRaylib()
 *                         ADDED: GuiBegin(GuiInput*, int)/GuiEnd(), per-context state,
@@ -191,8 +193,9 @@
 *                         ADDED: Internal Dropdown open state, no caller-side edit flags
 *                         REDESIGNED: GuiValueBox/GuiValueBoxFloat use an internal GuiTextBox,
 *                                     text is persistent while editing and parsed only on commit
-*                         REDESIGNED: GuiValueBoxFloat(..., float *value) uses an internal text
-*                                     buffer like GuiValueBox; the caller textValue buffer was removed
+*                         REDESIGNED: GuiValueBoxFloat(..., float *value, float minValue, float maxValue)
+*                                     uses an internal text buffer like GuiValueBox; maxValue <= minValue
+*                                     disables the range limit for both ValueBox controls
 *                         REMOVED: GuiSetCapturedId(), GuiPushId() and GuiPopId(), ids are automatic now
 *                         REMOVED: guiControlExclusiveMode/guiControlExclusiveRec, drag uses capture
 *                         REDESIGNED: WARNING: GuiTextBox/ValueBox/ValueBoxFloat/Spinner/DropdownBox
@@ -845,12 +848,15 @@ typedef enum {
 // Input and context types
 //----------------------------------------------------------------------------------
 #if !defined(RAYGUI_MAX_INPUTS)
-    #define RAYGUI_MAX_INPUTS           8
+    #define RAYGUI_MAX_INPUTS           8       // Maximum GuiInput entries accepted by GuiBegin()
 #endif
 
-// Input snapshot injected through GuiBegin()
+// Input snapshot injected through GuiBegin(). GuiBegin() copies the array, so the caller
+// may reuse it immediately. touchId must be unique within one frame; 0 is normally mouse.
+// A press frame should set pressed=true and down=true; a release frame should set
+// released=true and down=false. A same-frame press+release is not synthesized into a click.
 typedef struct GuiInput {
-    Vector2 position;       // Current pointer position
+    Vector2 position;       // Current pointer position (global coordinates)
     bool pressed;           // Pressed this frame
     bool released;          // Released this frame
     bool down;              // Held down
@@ -869,9 +875,9 @@ typedef enum {
 #endif
 
 typedef struct GuiHitEntry {
-    unsigned int id;                // Control id
-    Rectangle bounds;               // Control bounds for hit tests
-    int dragDirection;              // GuiDragDirection flags supported by the control
+    unsigned int id;                // Control id (internal)
+    Rectangle bounds;               // Control bounds for hit tests (internal)
+    int dragDirection;              // GuiDragDirection flags supported by the control (internal)
 } GuiHitEntry;
 
 #if !defined(RAYGUI_VALUEBOX_MAX_CHARS)
@@ -887,7 +893,9 @@ typedef struct GuiValueBoxBuffer {
     char text[RAYGUI_VALUEBOX_MAX_CHARS + 1];
 } GuiValueBoxBuffer;
 
-// Isolated interaction context. Zero-initialize before first use.
+// Isolated interaction context. Zero-initialize before first use and keep it alive while
+// used; do not copy/move it after GuiPushContext() because internal pointers target it.
+// Single-context UIs do not need a GuiContext (the library owns a default one).
 typedef struct GuiContext {
     // Capture ownership
     unsigned int capturedId;        // Confirmed owner
@@ -976,8 +984,11 @@ extern "C" {            // Prevents name mangling of functions
 // Global gui state control functions
 RAYGUIAPI void GuiEnable(void);                                 // Enable gui controls (global state)
 RAYGUIAPI void GuiDisable(void);                                // Disable gui controls (global state)
-RAYGUIAPI void GuiLock(void);                                   // Lock gui controls (global state)
-RAYGUIAPI void GuiUnlock(void);                                 // Unlock gui controls (global state)
+// GuiLock() blocks every input path (pointer, keyboard, wheel), including an active text
+// editor, an open dropdown and an in-progress drag. Interaction state freezes; GuiUnlock()
+// resumes it. Locked frames still draw normally.
+RAYGUIAPI void GuiLock(void);                                   // Lock all gui interaction (global state)
+RAYGUIAPI void GuiUnlock(void);                                 // Unlock gui interaction (global state)
 RAYGUIAPI bool GuiIsLocked(void);                               // Check if gui is locked (global state)
 RAYGUIAPI void GuiSetAlpha(float alpha);                        // Set gui controls alpha (global state), alpha goes from 0.0f to 1.0f
 RAYGUIAPI void GuiSetState(int state);                          // Set gui state (global state)
@@ -999,26 +1010,46 @@ RAYGUIAPI void GuiLoadStyleDefault(void);                       // Load style de
 // Scissor function
 RAYGUIAPI void GuiSetScissor(Rectangle rect);                   // Clip mouse interact outside the Rectangle
 
-// Control capture and context functions
+// Frame lifecycle and control capture
 // NOTE: Controls are assigned an id automatically in draw order. On the press frame the
 // topmost hit control becomes the tentative owner; after the drag threshold the direction
 // arbitration confirms the final owner. Only that control can interact until release.
-// Frames must be paired: GuiBegin()/GuiEnd(), GuiBeginFromRaylib()/GuiEndFromRaylib()
-// or GuiBeginFrame()/GuiEndFrame().
-RAYGUIAPI void GuiBegin(GuiInput *inputs, int inputCount);      // Start a frame with explicit inputs
-RAYGUIAPI void GuiEnd(void);                                    // End the current frame
-RAYGUIAPI void GuiBeginFrame(void);                             // Start a frame from GUI_* macros
+//
+// Every frame must be opened and closed with one of these pairs:
+//   GuiBegin(inputs, count) / GuiEnd()              explicit GuiInput snapshot
+//   GuiBeginFromRaylib()    / GuiEndFromRaylib()    raylib mouse + touch adapter
+//   GuiBeginFrame()         / GuiEndFrame()         GUI_POINTER_* / GUI_BUTTON_* macros
+// The pairs must not be mixed inside one frame.
+//
+// Layered UI: open ONE frame for the whole layer stack and draw layers from bottom to top.
+// Do not start/end a frame per window or per layer: the topmost drawn control already wins
+// the hit stack, and modal controls block the layers below. GuiPushContext() is for
+// disjoint touch regions, not for overlapping layers (routing is first-claim, not z-order).
+// To block a background layer while a popup is open, call GuiLock() before drawing the
+// background and GuiUnlock() before drawing the popup (or draw a fullscreen blocker).
+RAYGUIAPI void GuiBegin(GuiInput *inputs, int inputCount);      // Start a frame; inputs are copied (NULL/0 = no input)
+RAYGUIAPI void GuiEnd(void);                                    // End the frame and resolve capture/hover for all contexts
+RAYGUIAPI void GuiBeginFrame(void);                             // Start a frame from the configured GUI_* input macros
 RAYGUIAPI void GuiEndFrame(void);                               // End a frame started with GuiBeginFrame()
-RAYGUIAPI void GuiBeginFromRaylib(void);                        // Start a frame from raylib input
+RAYGUIAPI void GuiBeginFromRaylib(void);                        // Start a frame from raylib mouse/touch input
 RAYGUIAPI void GuiEndFromRaylib(void);                          // End a frame started with GuiBeginFromRaylib()
-RAYGUIAPI void GuiPushContext(GuiContext *ctx, Rectangle bounds); // Enter an isolated context
-RAYGUIAPI void GuiPopContext(void);                             // Leave the current context
-RAYGUIAPI void GuiCancel(GuiContext *ctx);                      // Cancel all interaction state without triggering
-RAYGUIAPI void GuiReleaseCapture(GuiContext *ctx);              // Release capture without triggering
-RAYGUIAPI void GuiSetDragThreshold(float threshold);            // Set the drag threshold in pixels
-RAYGUIAPI float GuiGetDragThreshold(void);                      // Get the drag threshold in pixels
-RAYGUIAPI unsigned int GuiGetCapturedId(void);                  // Get current captured id (0 if no capture is active)
-RAYGUIAPI bool GuiIsEditing(void);                              // Check if a text control is currently being edited
+
+// Multiple independent UI regions (for example a left joystick and right buttons).
+// A context is caller-owned and persists across frames: zero-initialize it once, then
+// push/pop it every frame while it is visible. Contexts are siblings, never nested.
+// GuiPushContext() routes one unclaimed touch inside bounds to ctx; that touch stays
+// routed (even outside bounds) until release. bounds uses global coordinates and is
+// only used for routing, not for clipping.
+RAYGUIAPI void GuiPushContext(GuiContext *ctx, Rectangle bounds); // Enter ctx and route one touch to it
+RAYGUIAPI void GuiPopContext(void);                             // Leave the current context (returns to default)
+RAYGUIAPI void GuiCancel(GuiContext *ctx);                      // ctx==NULL: current; silent clear, no results
+RAYGUIAPI void GuiReleaseCapture(GuiContext *ctx);              // ctx==NULL: current; drop capture only
+RAYGUIAPI void GuiSetDragThreshold(float threshold);            // Set global drag threshold in pixels (default 5)
+RAYGUIAPI float GuiGetDragThreshold(void);                      // Get global drag threshold in pixels
+
+// Queries for the current context
+RAYGUIAPI unsigned int GuiGetCapturedId(void);                  // press: tentative, confirmed: captured, idle: 0
+RAYGUIAPI bool GuiIsEditing(void);                              // Whether this context has an active text editor
 
 // Tooltips management functions
 RAYGUIAPI void GuiEnableTooltip(void);                          // Enable gui tooltips (global state)
@@ -1057,11 +1088,15 @@ RAYGUIAPI int GuiToggleSlider(Rectangle bounds, const char *text, int *active); 
 RAYGUIAPI int GuiCheckBox(Rectangle bounds, const char *text, bool *checked);                          // Check Box control, returns true when active
 RAYGUIAPI int GuiComboBox(Rectangle bounds, const char *text, int *active);                            // Combo Box control
 
-RAYGUIAPI int GuiDropdownBox(Rectangle bounds, const char *text, int *active);          // Dropdown Box control
-RAYGUIAPI int GuiSpinner(Rectangle bounds, const char *text, int *value, int minValue, int maxValue); // Spinner control
-RAYGUIAPI int GuiValueBox(Rectangle bounds, const char *text, int *value, int minValue, int maxValue); // Value Box control, updates input text with numbers
-RAYGUIAPI int GuiValueBoxFloat(Rectangle bounds, const char *text, float *value); // Value box control for float values
-RAYGUIAPI int GuiTextBox(Rectangle bounds, char *text, int textSize);                   // Text Box control, updates input text
+// Text / value input controls
+// NOTE: All of them manage focus internally (editId); there is no editMode parameter.
+// While editing they are modal, and the commit result is delivered on ENTER/ESCAPE or
+// on the release frame after clicking outside.
+RAYGUIAPI int GuiDropdownBox(Rectangle bounds, const char *text, int *active);          // Dropdown Box; open state is internal and modal
+RAYGUIAPI int GuiSpinner(Rectangle bounds, const char *text, int *value, int minValue, int maxValue); // Spinner: two Buttons + internal ValueBox (no composite id)
+RAYGUIAPI int GuiValueBox(Rectangle bounds, const char *text, int *value, int minValue, int maxValue); // Int ValueBox: internal buffer, parse on commit; maxValue <= minValue disables limits
+RAYGUIAPI int GuiValueBoxFloat(Rectangle bounds, const char *text, float *value, float minValue, float maxValue); // Float ValueBox, same rules as GuiValueBox
+RAYGUIAPI int GuiTextBox(Rectangle bounds, char *text, int textSize);                   // Text Box; textSize includes the terminator; focus is internal
 
 RAYGUIAPI int GuiSlider(Rectangle bounds, const char *textLeft, const char *textRight, float *value, float minValue, float maxValue); // Slider control
 RAYGUIAPI int GuiSliderBar(Rectangle bounds, const char *textLeft, const char *textRight, float *value, float minValue, float maxValue); // Slider Bar control
@@ -2132,7 +2167,7 @@ static bool GuiCanInteract(void)
     return (id == guiCapture.capturedId);
 }
 
-// Deliver a discrete result for the current control, allowing only one id per frame
+// Deliver a discrete result for the current control, allowing only one id per context frame
 static int GuiDiscreteResult(int result)
 {
     if (result == RESULT_NONE) return RESULT_NONE;
@@ -2478,6 +2513,8 @@ static void GuiAddFrameContext(GuiContext *ctx)
 }
 
 // Start a frame with explicit inputs
+// NOTE: inputs[] is copied; inputCount is capped to RAYGUI_MAX_INPUTS. The default
+// context uses only inputs[0]. Extra inputs are available to GuiPushContext() scopes.
 void GuiBegin(GuiInput *inputs, int inputCount)
 {
     if (guiFrameInProgress)
@@ -2506,6 +2543,8 @@ void GuiBegin(GuiInput *inputs, int inputCount)
 }
 
 // Enter an isolated context; contexts are siblings, nesting is not allowed
+// bounds is in global coordinates and is used only to route an unclaimed touch to ctx.
+// The routed touch stays with ctx until release, even if it leaves bounds.
 void GuiPushContext(GuiContext *ctx, Rectangle bounds)
 {
     if (!guiFrameInProgress)
@@ -2538,6 +2577,8 @@ void GuiPushContext(GuiContext *ctx, Rectangle bounds)
 }
 
 // Leave the current context and return to the default one
+// NOTE: Capture and edit state remain in the context for the next frame; only the
+// current frame's visible input set is cleared.
 void GuiPopContext(void)
 {
     if (guiCurrentContext == &guiDefaultContext)
@@ -2709,6 +2750,9 @@ void GuiEndFromRaylib(void)
 }
 
 // Cancel every interaction in a context without triggering any control
+// ctx == NULL targets the current context. Clears capture, hover, modal, editId and
+// dropdown state, but leaves external text/value buffers untouched. Call this on window
+// focus loss or before destroying a context; do not emulate a touch release instead.
 void GuiCancel(GuiContext *ctx)
 {
     if (ctx == NULL) ctx = guiCurrentContext;
@@ -2725,6 +2769,8 @@ void GuiCancel(GuiContext *ctx)
 }
 
 // Release the capture without triggering the captured control
+// ctx == NULL targets the current context. Text edit / dropdown / touch routing state is
+// preserved; only capture ownership is dropped.
 void GuiReleaseCapture(GuiContext *ctx)
 {
     if (ctx == NULL) ctx = guiCurrentContext;
@@ -2738,7 +2784,7 @@ void GuiReleaseCapture(GuiContext *ctx)
     ctx->commitId = 0;
 }
 
-// Configure the drag threshold in pixels
+// Configure the global drag threshold in pixels (negative values are clamped to 0)
 void GuiSetDragThreshold(float threshold)
 {
     guiDragThreshold = (threshold < 0.0f)? 0.0f : threshold;
@@ -2750,14 +2796,16 @@ float GuiGetDragThreshold(void)
     return guiDragThreshold;
 }
 
-// Get the current captured control id (0 if no capture is active)
+// Get the current captured control id for the current context
+// Returns tentativeId on the press frame, capturedId after confirmation, 0 when idle.
 unsigned int GuiGetCapturedId(void)
 {
     if (guiCapture.isConfirmed) return guiCapture.capturedId;
     return guiCapture.tentativeId;
 }
 
-// Check if any text control is currently being edited
+// Check whether the current context has an active text editor
+// NOTE: keyboard input is global; do not edit text in two contexts simultaneously.
 bool GuiIsEditing(void)
 {
     return (guiCapture.editId != 0);
@@ -3525,7 +3573,8 @@ int GuiComboBox(Rectangle bounds, const char *text, int *active)
 }
 
 // Dropdown Box control
-// NOTE: Returns mouse click; the open/closed state is managed internally by gui
+// NOTE: Open/closed state and the focused item are internal. While open the control is
+// modal: clicking outside closes it without activating the controls underneath.
 int GuiDropdownBox(Rectangle bounds, const char *text, int *active)
 {
     int result = RESULT_NONE;
@@ -3665,7 +3714,10 @@ int GuiDropdownBox(Rectangle bounds, const char *text, int *active)
 }
 
 // Text Box control
-// NOTE: Returns true on commit (ENTER, ESCAPE or click outside); edit state is internal
+// NOTE: Returns RESULT_PRESSED on commit (ENTER, ESCAPE or click outside); edit state and
+// cursor are internal (editId), so no caller-side editMode is needed. textSize includes
+// the string terminator. styleControl lets ValueBox reuse this implementation with
+// VALUEBOX styling; readOnly disables editing for that invocation.
 static int GuiTextBoxStyled(Rectangle bounds, char *text, int textSize, int styleControl, bool readOnly)
 {
     #if !defined(RAYGUI_TEXTBOX_AUTO_CURSOR_COOLDOWN)
@@ -4176,6 +4228,7 @@ static int GuiTextBoxStyled(Rectangle bounds, char *text, int textSize, int styl
 
 
 // Text Box control
+// NOTE: Public entry using TEXTBOX styling; commit and edit focus are internal.
 int GuiTextBox(Rectangle bounds, char *text, int textSize)
 {
     return GuiTextBoxStyled(bounds, text, textSize, TEXTBOX, GuiGetStyle(TEXTBOX, TEXT_READONLY) != 0);
@@ -4204,6 +4257,9 @@ bool GuiTextBoxMulti(Rectangle bounds, char *text, int textSize)
 */
 
 // Spinner control, returns selected value
+// NOTE: The spinner is only a layout helper: it draws two GuiButton controls and an
+// internal GuiValueBox. Those children own their capture ids independently; clicking an
+// arrow while the value box is editing first commits the editor (modal), then steps.
 int GuiSpinner(Rectangle bounds, const char *text, int *value, int minValue, int maxValue)
 {
     int result = RESULT_NONE;
@@ -4267,8 +4323,11 @@ int GuiSpinner(Rectangle bounds, const char *text, int *value, int minValue, int
     return result;
 }
 
-// Value Box control, updates input text with numbers
-// NOTE: Editing is handled by an internal GuiTextBox; the text is parsed only on commit
+// Int Value Box control
+// NOTE: Editing is handled by an internal GuiTextBox with a persistent per-context buffer.
+// The text is parsed only on commit; invalid text keeps the previous value.
+// If maxValue > minValue the value is clamped (external and committed); if
+// maxValue <= minValue the range limit is disabled.
 int GuiValueBox(Rectangle bounds, const char *text, int *value, int minValue, int maxValue)
 {
     int result = RESULT_NONE;
@@ -4298,8 +4357,12 @@ int GuiValueBox(Rectangle bounds, const char *text, int *value, int minValue, in
     // While editing (or waiting to deliver a commit) keep the user text; otherwise mirror the value
     if (!editing && !pendingCommit)
     {
-        if (*value > maxValue) *value = maxValue;
-        else if (*value < minValue) *value = minValue;
+        // maxValue <= minValue disables the range limit
+        if (maxValue > minValue)
+        {
+            if (*value > maxValue) *value = maxValue;
+            else if (*value < minValue) *value = minValue;
+        }
 
         snprintf(valueText, RAYGUI_VALUEBOX_MAX_CHARS + 1, "%i", *value);
     }
@@ -4323,8 +4386,12 @@ int GuiValueBox(Rectangle bounds, const char *text, int *value, int minValue, in
         if (end != valueText)
         {
             *value = (int)parsed;
-            if (*value > maxValue) *value = maxValue;
-            else if (*value < minValue) *value = minValue;
+
+            if (maxValue > minValue)
+            {
+                if (*value > maxValue) *value = maxValue;
+                else if (*value < minValue) *value = minValue;
+            }
         }
     }
 
@@ -4340,8 +4407,9 @@ int GuiValueBox(Rectangle bounds, const char *text, int *value, int minValue, in
 }
 
 // Floating point Value Box control
-// NOTE: Same internal-buffer design as GuiValueBox; the text is parsed only on commit
-int GuiValueBoxFloat(Rectangle bounds, const char *text, float *value)
+// NOTE: Same internal-buffer design and commit-only parsing as GuiValueBox.
+// maxValue > minValue enables clamping; maxValue <= minValue disables the range limit.
+int GuiValueBoxFloat(Rectangle bounds, const char *text, float *value, float minValue, float maxValue)
 {
     int result = RESULT_NONE;
     GuiState state = guiState;
@@ -4367,7 +4435,17 @@ int GuiValueBoxFloat(Rectangle bounds, const char *text, float *value)
     bool pendingCommit = (guiCapture.commitId == id);
 
     // While editing (or waiting to deliver a commit) keep the user text; otherwise mirror the value
-    if (!editing && !pendingCommit) snprintf(valueText, RAYGUI_VALUEBOX_MAX_CHARS + 1, "%g", *value);
+    if (!editing && !pendingCommit)
+    {
+        // maxValue <= minValue disables the range limit
+        if (maxValue > minValue)
+        {
+            if (*value > maxValue) *value = maxValue;
+            else if (*value < minValue) *value = minValue;
+        }
+
+        snprintf(valueText, RAYGUI_VALUEBOX_MAX_CHARS + 1, "%g", *value);
+    }
 
     int prevAlignment = GuiGetStyle(VALUEBOX, TEXT_ALIGNMENT);
     GuiSetStyle(VALUEBOX, TEXT_ALIGNMENT, TEXT_ALIGN_CENTER);
@@ -4384,11 +4462,18 @@ int GuiValueBoxFloat(Rectangle bounds, const char *text, float *value)
     {
         char *end = NULL;
         float parsed = strtof(valueText, &end);
-        if (end != valueText) *value = parsed;
-    }
 
-    // DEBUG
-    // printf("VBUF '%s' editing=%d result=%d value=%f\n", valueText, editing, result, *value);
+        if (end != valueText)
+        {
+            *value = parsed;
+
+            if (maxValue > minValue)
+            {
+                if (*value > maxValue) *value = maxValue;
+                else if (*value < minValue) *value = minValue;
+            }
+        }
+    }
 
     // Draw text label if provided
     if (guiCapture.editId == id) state = STATE_PRESSED;
@@ -5491,8 +5576,9 @@ void GuiSetScissor(Rectangle rect)
 //----------------------------------------------------------------------------------
 // Control capture functions
 //----------------------------------------------------------------------------------
-// NOTE: GuiBeginFrame/GuiBeginFromRaylib/GuiEnd/GuiGetCapturedId are defined before the
-// controls (see "Frame management" above), capture ids are assigned automatically.
+// NOTE: Frame/context functions (GuiBegin/GuiEnd, GuiPushContext/GuiPopContext,
+// GuiCancel, GuiReleaseCapture, ...) are defined before the controls; capture ids are
+// assigned automatically in draw order.
 
 //----------------------------------------------------------------------------------
 // Tooltip management functions

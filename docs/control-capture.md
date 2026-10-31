@@ -104,6 +104,53 @@ unsigned int GuiGetCapturedId(void);   // 当前 context：press 帧返回 tenta
 bool GuiIsEditing(void);               // 当前 context 是否有文本控件正在编辑
 ```
 
+### 2.2 多层 UI / 浮层
+
+整棵 UI 树（主界面、浮动窗口、弹窗、菜单）只在最外层开一帧：
+
+```c
+GuiBeginFromRaylib();
+
+DrawMainLayer();          // 底层
+DrawFloatingWindows();   // 按 z-order 从下到上
+DrawPopup();             // 最上层
+
+GuiEndFromRaylib();
+```
+
+不要每个窗口/每个 layer 调一次 `GuiBeginFromRaylib/GuiEndFromRaylib`，也不要在中间调用
+`GuiEndFromRaylib`。那样会结束当前帧，再开一帧时 capture/tentative/hitStack 已经重置，输入会被拆散。
+
+命中与遮挡规则：
+
+- 同一帧内所有 layer 共用一个输入快照；
+- 重叠时，**后绘制（上层）的控件在 hitStack 顶部**，优先获得 capture；
+- 文本编辑 / 展开的 Dropdown 是模态的，会吃掉外部点击，不会穿透到底层；
+- `GuiPushContext` 不是图层机制：它按 Push 顺序给互不重叠的区域路由 touch，先 Push 的先占，
+  不做 z-order 判定。重叠窗口请共用默认 context，靠绘制顺序决定顶层。
+
+弹窗打开时锁住底层：
+
+```c
+GuiBeginFromRaylib();
+
+if (popupOpen) GuiLock();   // 底层控件绘制期间被锁住
+DrawMainLayer();
+
+if (popupOpen)
+{
+    GuiUnlock();            // 只让弹窗可交互
+    DrawPopup();
+}
+
+GuiEndFromRaylib();
+```
+
+`GuiLock` 是逐控件生效的：绘制底层时锁定，绘制弹窗前解锁即可。不要用“再开一帧”来隔离图层。
+
+z-order 注意：自动 ID 按绘制顺序分配。拖动/编辑进行中不要重排窗口层级，否则控件 ID 会变化，
+capture 可能丢失。等手势结束后再调整 z-order。
+
 ## 3. 状态机
 
 核心状态位于 `src/raygui.h` 的 `GuiContext`（每 context 一份）：
@@ -170,8 +217,9 @@ release 帧的返回规则：
     capture ID，Spinner 本身不额外 `GuiControlBegin`。编辑中点箭头：第一次只提交（模态），
     第二次才步进。点击 Spinner 中间仍会从其他 TextBox 抢占编辑焦点。
   - **ValueBox / ValueBoxFloat 基于内部 GuiTextBox 实现**：编辑期间保留文本 buffer，只有提交
-    （Enter/ESC/点击外部）时才 parse 数值；非法文本保留原值，整数提交时 clamp。光标、选择、
-    粘贴等交互与 TextBox 一致；输入数字不会在提交前修改 `*value`。
+    （Enter/ESC/点击外部）时才 parse 数值；非法文本保留原值。`maxValue > minValue` 时对提交值
+    和外部值 clamp，`maxValue <= minValue` 表示不限制。光标、选择、粘贴等交互与 TextBox 一致；
+    输入数字不会在提交前修改 `*value`。
   - **Dropdown 的展开状态也由 GUI 内部保存**（`dropdownOpenId`），业务层不需要 editMode 变量。
 - `GuiGrid()` 不再返回 `RESULT_PRESSED`，只输出 `mouseCell`。
 - `GuiLock()` 阻断所有输入（指针、键盘、滚轮），包括正在编辑的 TextBox、展开的 Dropdown 和
