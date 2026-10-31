@@ -170,8 +170,9 @@ release 帧的返回规则：
     capture ID，Spinner 本身不额外 `GuiControlBegin`。编辑中点箭头：第一次只提交（模态），
     第二次才步进。点击 Spinner 中间仍会从其他 TextBox 抢占编辑焦点。
   - **ValueBox / ValueBoxFloat 基于内部 GuiTextBox 实现**：编辑期间保留文本 buffer，只有提交
-    （Enter/ESC/点击外部）时才 parse 数值；非法文本保留原值，整数提交时 clamp。光标、选择、
-    粘贴等交互与 TextBox 一致；输入数字不会在提交前修改 `*value`。
+    （Enter/ESC/点击外部）时才 parse 数值；非法文本保留原值。`maxValue > minValue` 时对提交值
+    和外部值 clamp，`maxValue <= minValue` 表示不限制。光标、选择、粘贴等交互与 TextBox 一致；
+    输入数字不会在提交前修改 `*value`。
   - **Dropdown 的展开状态也由 GUI 内部保存**（`dropdownOpenId`），业务层不需要 editMode 变量。
 - `GuiGrid()` 不再返回 `RESULT_PRESSED`，只输出 `mouseCell`。
 - `GuiLock()` 阻断所有输入（指针、键盘、滚轮），包括正在编辑的 TextBox、展开的 Dropdown 和

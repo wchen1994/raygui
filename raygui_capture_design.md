@@ -364,7 +364,7 @@ unsigned int GuiGetCapturedId(void);
 bool GuiIsEditing(void);
 int GuiTextBox(..., char *text, int textSize);
 int GuiValueBox(..., int *value, int minValue, int maxValue);
-int GuiValueBoxFloat(..., float *value);
+int GuiValueBoxFloat(..., float *value, float minValue, float maxValue);
 int GuiSpinner(..., int *value, int minValue, int maxValue);
 int GuiDropdownBox(..., int *active);
 ```
