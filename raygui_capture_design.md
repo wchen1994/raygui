@@ -104,8 +104,10 @@ typedef struct {
     int dragDirection;             // 仲裁出的拖拽方向
     bool isConfirmed;              // 是否已过 threshold 确认
     unsigned int editId;           // 当前文本编辑控件 ID（0 = 无编辑）
-    GuiInput* inputs;              // 该 context 可见的输入
-    int inputCount;
+    int inputIndex;                // 绑定到 inputs[] 的下标（-1 = 无）
+    bool hasTouch;                 // 是否正在持有该 input
+    Vector2 dragDelta;             // 输入层统一计算的帧位移
+    bool dragActive;               // 已确认 capture + 按住 + 越过阈值
 } GuiContext;
 ```
 
@@ -115,25 +117,26 @@ typedef struct {
 void GuiBegin(GuiInput* inputs, int inputCount);          // 帧开始，注入所有 touch 输入
 void GuiEnd(void);                                         // 帧结束
 
-void GuiPushContext(GuiContext* ctx, Rectangle bounds);   // 进入 context 作用域，bounds 用于路由
+void GuiPushContext(GuiContext* ctx);                     // 进入 context，取第一个空闲 input
 void GuiPopContext(void);                                  // 退出，必须配对
 ```
 
 **约束：**
 - `GuiPushContext / GuiPopContext` **不允许嵌套**，context 之间必须平级。
 - 单 context 时不需要 Push/Pop，默认使用内置全局 context。
-- `GuiPushContext` 时按 bounds 自动决定哪个 touchId 对该 context 可见。
+- `GuiPushContext` 从 `inputs[]` 取第一个 `occupied == false` 的 input；优先 `pressed/down`，其次 idle。
+- `GuiPopContext` 在按住时把 input 标记 `occupied`，在 release 帧放行。
 
 **业务层用法：**
 
 ```c
 GuiBegin(inputs, 2);              // 两个 touch
 
-GuiPushContext(&guiLeft, leftBounds);
+GuiPushContext(&guiLeft);
 DrawLeftUI();                      // 摇杆等，内部控件自动归属 guiLeft
 GuiPopContext();
 
-GuiPushContext(&guiRight, rightBounds);
+GuiPushContext(&guiRight);
 DrawRightUI();                     // 按钮等，内部控件自动归属 guiRight
 GuiPopContext();
 
@@ -152,10 +155,10 @@ GuiEnd();
 
 | 情况 | 行为 |
 |------|------|
-| 某指已被某 context capture | 该指只路由给这个 context，不传递给其他 context |
-| 某指未被任何 context capture | 按 `GuiPushContext` 调用顺序尝试，命中 bounds 的 context 捕获该指 |
+| 某指已被某 context 占用 | 该 input `occupied == true`，后续 context 跳过 |
+| 某指未被占用 | 按 `GuiPushContext` 调用顺序分配给第一个请求的 context |
 | 单 context | 只处理第一个 `GuiInput`，其余忽略 |
-| 多指并发（左摇杆 + 右按钮） | 拆两个平级 context，每个接收独立的 touchId，各自独立走完整 capture 流程 |
+| 多指并发（左摇杆 + 右按钮） | 拆两个平级 context，各自取一个空闲 input，独立走完整 capture 流程 |
 
 **capture 建立后不重新路由该 touchId。** context 是隔离单元，不是并发单元；并发靠数量解决。
 
@@ -225,7 +228,7 @@ float GuiGetDragThreshold(void);              // 查询当前 threshold
   - `capturedId` / `tentativeId` / `hoverId`
   - hitStack 数组及其计数
   - press 起始位置 `startPos`、拖拽方向 `dragDirection`、仲裁确认标记 `isConfirmed`
-  - TextBox/ValueBox 的 `editId`（单编辑焦点）、Dropdown 的 `dropdownOpenId`
+  - TextBox/ValueBox 编辑与 Dropdown 展开共用的 `editId`（单活动模态焦点）
 - 提供一个内置默认 context（单 context 场景使用），由 `guiGetCurrentContext()` 返回当前作用域的 context 指针。
 - 所有控件内部把 `capturedId` 等访问改为 `currentCtx->capturedId`。
 
@@ -248,8 +251,8 @@ float GuiGetDragThreshold(void);              // 查询当前 threshold
 **改什么**：新增 `GuiPushContext / GuiPopContext`，维护一个 context 栈（实际只需支持一层平级切换，用单个 `currentCtx` 指针即可，但要校验不嵌套）。
 
 **怎么改**：
-- `GuiPushContext(ctx, bounds)`：校验当前无已激活 context（防止嵌套），将 `currentCtx` 切到 `ctx`，并据 bounds 为该 context 过滤可见 touchId。
-- `GuiPopContext()`：恢复上一个 context（单级，即切回默认 context），清空当前 context 的 `inputs` 可见集。
+- `GuiPushContext(ctx)`：校验当前无已激活 context（防止嵌套），将 `currentCtx` 切到 `ctx`，并从 `inputs[]` 取第一个 `occupied == false` 的 input。
+- `GuiPopContext()`：按住时标记 `occupied = true`；release 帧放行并清除绑定。
 - 内部用断言或错误日志拒绝嵌套调用。
 
 **影响范围**：新增 2 个公共 API；控件无需改动。
@@ -301,13 +304,13 @@ float GuiGetDragThreshold(void);              // 查询当前 threshold
   底层控件不触发。
 - Enter / ESC：当帧提交并返回 `RESULT_PRESSED`（不存在对应的 release 事件）。
 - buffer 全程由 GUI 直接写，业务层自己保留原值用于回滚；Cancel 时 GUI 清 `editId`。
-- **同一 context 内同一时刻只有一个文本控件拥有编辑态**：点击另一个控件会提交旧焦点并切换；
-  键盘输入只送当前编辑控件。键盘输入仍是全局的，多 context 同时编辑文本不在支持范围。
+- **同一 context 内同一时刻只有一个活动模态控件**：点击另一个文本控件的第一次只提交旧焦点，
+  第二次才进入新控件；键盘输入只送当前编辑控件。键盘输入仍是全局的，多 context 同时编辑文本不在支持范围。
 - **Spinner 只是布局辅助**：由两个 Button 和一个内部 ValueBox 组成，三者各自持有 capture ID，
   Spinner 本身不调用 `GuiControlBegin`。编辑中点箭头第一次只提交（模态），第二次才步进。
 - **ValueBox / ValueBoxFloat 复用内部 GuiTextBox**：编辑期间保留文本 buffer，提交时才 parse
   数值；非法文本保留原值，整数提交时 clamp。这使它们获得完整的 TextBox 编辑交互。
-- **Dropdown 展开态内部保存**（`dropdownOpenId`），也不需要业务 flag。
+- **Dropdown 展开态与文本编辑共用 `editId`**，同样不需要业务 flag。
 - 阶段二的 `GuiCancel(ctx)` 会清 `editId` 和展开中的 Dropdown。
 
 **影响范围**：`GuiTextBox` / `GuiTextBoxMulti`、ValueBox 系列、Spinner、DropdownBox 及全部示例。
@@ -329,7 +332,7 @@ float GuiGetDragThreshold(void);              // 查询当前 threshold
 **改什么**：窗口失焦 / context 销毁时的状态清理。
 
 **怎么改**：
-- 新增 `GuiCancel(ctx)`：清零该 context 的 capturedId / tentativeId / hoverId / dragDirection / isConfirmed / editId / dropdownOpenId；不触发任何控件。
+- 新增 `GuiCancel(ctx)`：清零该 context 的 capturedId / tentativeId / hoverId / dragDirection / isConfirmed / editId / commitId；不触发任何控件。
 - `GuiEnd` 或平台层检测到窗口失焦时调用 `GuiCancel`，而非模拟 touch up。
 - context 被真正销毁（不再复用）前，调用方应主动 `GuiCancel(ctx)`；`GuiPopContext` 只退出
   作用域，保留 capture 以便下一帧继续。
@@ -361,8 +364,7 @@ void GuiEndFromRaylib(void);
 // 查询
 unsigned int GuiGetCapturedId(void);
 
-// 编辑态签名变更（破坏性）
-// 编辑/展开状态（阶段一已落地）
+// 编辑/展开状态（阶段一已落地；返回是否有活动编辑器或展开的 Dropdown）
 bool GuiIsEditing(void);
 int GuiTextBox(..., char *text, int textSize);
 int GuiValueBox(..., int *value, int minValue, int maxValue);
@@ -378,7 +380,7 @@ void GuiBegin(GuiInput* inputs, int inputCount);
 void GuiBeginFromRaylib(void);     // 保留，改为内部调用 GuiBegin
 void GuiEndFromRaylib(void);       // 保留，与 GuiBeginFromRaylib 配对
 void GuiEnd(void);
-void GuiPushContext(GuiContext* ctx, Rectangle bounds);
+void GuiPushContext(GuiContext* ctx);
 void GuiPopContext(void);
 unsigned int GuiGetCapturedId(void);
 void GuiCancel(GuiContext* ctx);

@@ -51,10 +51,12 @@ typedef struct GuiInput {
     bool released;      // 本帧刚松开
     bool down;          // 持续按住
     int touchId;        // 0 = 鼠标/主指，1..N = 其他触摸
+    bool occupied;      // GUI 路由占用标记，GuiBegin 清零
 } GuiInput;
 ```
 
-`GuiBegin()` 会拷贝本帧输入。默认 context 只使用第一个 input；多余触摸忽略。
+`GuiBegin()` 直接使用调用方的 inputs 数组（到 `GuiEnd()` 前必须保持有效），并把每个 input 的
+`occupied` 清零。默认 context 只使用第一个 input；多余触摸忽略。
 
 ### 2.1 多 context
 
@@ -64,11 +66,11 @@ GuiContext right = { 0 };
 
 GuiBegin(inputs, 2);
 
-GuiPushContext(&left, leftBounds);    // 从 leftBounds 内的未分配触摸中选一个
+GuiPushContext(&left);    // 取第一个 occupied == false 的 input
 DrawLeftUI();
-GuiPopContext();
+GuiPopContext();          // 按住则标记 occupied，松手则放行
 
-GuiPushContext(&right, rightBounds);
+GuiPushContext(&right);
 DrawRightUI();
 GuiPopContext();
 
@@ -79,11 +81,11 @@ GuiEnd();
 
 - context 平级，`GuiPushContext` 不允许嵌套；
 - 不 Push 时使用内置默认 context，单指场景零侵入；
-- 一次 Push 只为一个 context 路由一个 touchId，route 后跨帧保持，移出 bounds 也不重新分配；
-- 已被某 context 路由/捕获的触摸不会再传给兄弟 context；
-- 触摸释放后该 context 释放路由，下一帧可重新分配；
-- 持有触摸的 context 必须继续每帧 Push；删除 context 前调用 `GuiCancel()`，否则触摸归属会残留。
-- 调用方负责在 Push 前后自行设置裁剪区域，`bounds` 只用于输入路由，且使用全局坐标。
+- Push 优先选 `pressed/down` 的空闲 input，其次才选空闲的 hover input；
+- 绑定的 input 跨帧保持，直到该 input release；release 帧 Pop 时放行；
+- 一个 input 同时只属于一个 context；
+- 持有触摸的 context 必须继续每帧 Push；删除 context 前调用 `GuiCancel()`；
+- 调用方负责在 Push 前后自行设置裁剪区域，`GuiPushContext` 不再接收 bounds。
 
 控制接口：
 
@@ -101,7 +103,7 @@ float GuiGetDragThreshold(void);
 
 ```c
 unsigned int GuiGetCapturedId(void);   // 当前 context：press 帧返回 tentative，确认后返回 captured，空闲为 0
-bool GuiIsEditing(void);               // 当前 context 是否有文本控件正在编辑
+bool GuiIsEditing(void);               // 当前 context 是否有活动编辑器或展开的 Dropdown
 ```
 
 ### 2.2 多层 UI / 浮层
@@ -163,13 +165,14 @@ capture 可能丢失。等手势结束后再调整 z-order。
 | `tentativeId` | press 帧暂定归属（栈顶或模态控件） |
 | `capturedId` | 仲裁/抬起后确认的归属 |
 | `isConfirmed` / `didDrag` | 是否已确认 / 是否真正越过阈值 |
-| `modalId` | 当前模态控件（文本编辑或展开的 Dropdown） |
-| `editId` | 当前文本编辑控件 ID，单编辑焦点的唯一事实来源 |
-| `dropdownOpenId` | 当前展开的 Dropdown ID |
+| `editId` | 当前活动模态控件 ID（文本编辑或展开的 Dropdown） |
+| `modalFrame` | 活动控件最后绘制的帧，用于过期清理 |
 | `commitId` | 外部点击产生的待提交标记，在抬起帧交付 |
-| `inputs` / `activeInput` | 本 context 可见输入与当前驱动输入 |
-| `hasTouch` / `touchId` / `bounds` | 多 context 路由状态与作用域范围 |
+| `inputIndex` | 绑定到 inputs[] 的下标（-1 = 无） |
+| `hasTouch` | 是否正在持有该 input |
 | `dragDelta` / `dragActive` | 输入层统一计算的帧位移与“已确认拖动中”状态 |
+| `editText` / `commitText` | 当前 ValueBox 编辑文本 / 待提交文本（各一份） |
+| `editTextIsValueBox` / `commitTextValid` | 当前文本/待提交文本是否属于 ValueBox |
 
 帧边界行为：
 
@@ -213,9 +216,9 @@ release 帧的返回规则：
   - Enter/ESC 当帧提交并返回 `RESULT_PRESSED`。
   - 编辑中点击外部：press 帧清 `editId`、设置 commit 标记，release 帧返回提交结果，
     底层控件不触发。
-  - **同一 context 内只有一个文本控件拥有编辑态**：点击另一个 TextBox/ValueBox 会提交旧焦点并切换；
-    键盘输入只送当前编辑控件。业务层可用 `GuiIsEditing()` 查询当前 context 是否有文本正在编辑。
-    键盘输入是全局的，不要让两个 context 同时编辑文本。
+  - **同一 context 内只有一个活动模态控件**：点击另一个 TextBox/ValueBox 的第一次只提交旧焦点，
+    第二次才进入新控件；键盘输入只送当前编辑控件。`GuiIsEditing()` 查询当前 context 是否有
+    活动编辑器或展开的 Dropdown。键盘输入是全局的，不要让两个 context 同时编辑文本。
   - **Spinner 只是布局辅助**：由两个 `GuiButton` 和一个内部 `GuiValueBox` 组成，三者各自持有
     capture ID，Spinner 本身不额外 `GuiControlBegin`。编辑中点箭头：第一次只提交（模态），
     第二次才步进。点击 Spinner 中间仍会从其他 TextBox 抢占编辑焦点。
@@ -223,7 +226,7 @@ release 帧的返回规则：
     （Enter/ESC/点击外部）时才 parse 数值；非法文本保留原值。`maxValue > minValue` 时对提交值
     和外部值 clamp，`maxValue <= minValue` 表示不限制。光标、选择、粘贴等交互与 TextBox 一致；
     输入数字不会在提交前修改 `*value`。
-  - **Dropdown 的展开状态也由 GUI 内部保存**（`dropdownOpenId`），业务层不需要 editMode 变量。
+  - **Dropdown 的展开状态也由 GUI 内部保存**（与文本编辑共用 `editId`），业务层不需要 editMode 变量。
 - `GuiGrid()` 不再返回 `RESULT_PRESSED`，只输出 `mouseCell`。
 - `GuiLock()` 阻断所有输入（指针、键盘、滚轮），包括正在编辑的 TextBox、展开的 Dropdown 和
   拖动中的 Slider/ScrollBar；锁定期间交互状态冻结，解锁后继续。
@@ -243,7 +246,7 @@ GuiEndFromRaylib();
 - 删除 `GuiSetCapturedId()` / `GuiPushId()` / `GuiPopId()` 调用。
 - 删除 `GuiTextBox/ValueBox/ValueBoxFloat/Spinner/DropdownBox` 的 `editMode` 实参。
 - 删除 `if (GuiTextBox(...)) editMode = !editMode;` 模式；提交结果直接用于解析/校验。
-- 需要知道是否有文本正在编辑时，使用 `GuiIsEditing()`。
+- 需要知道当前 context 是否有活动编辑器或展开的 Dropdown 时，使用 `GuiIsEditing()`。
 - 展开 Dropdown 不再需要手工 `GuiLock()` 包裹（模态捕获已处理）。
 
 ## 7. 测试
@@ -272,12 +275,12 @@ GuiEndFromRaylib();
 - `GuiGrid` 不产生离散触发；
 - 一个 context 每帧最多一个离散控件触发；多个平级 context 可同帧各自触发。
 - `GuiBegin(GuiInput*, int)` 显式输入点击；
-- 两个平级 context 分别接收独立 touchId，同帧各自触发；
-- context 捕获后触摸移出 bounds 仍继续更新，且不重路由给兄弟 context；
-- 已被右侧 context 路由的触摸不会被先 Push 的左侧 context 抢走；
+- 两个平级 context 分别取独立 input，同帧各自触发；
+- 按住期间 input 被标记 `occupied`，release 后放行；
+- 已被 context 占用的 input 不被后续 context 重复使用；
 - 默认 context 只使用第一个 input，忽略多余触摸；
 - `GuiCancel` / `GuiReleaseCapture` 不触发控件；
-- context 内取消后可重新 Push，不破坏帧链表；缺失 touch release 时自动清理路由；
+- context 内取消后可重新 Push，不破坏帧链表；丢失 input 时自动清理绑定；
 - `GuiSetDragThreshold` / `GuiGetDragThreshold` 运行时配置。
 
 构建与运行：
@@ -301,7 +304,9 @@ gcc -std=c99 -I src tests/capture_core_test.c -o capture_core_test.exe
 - 未调用帧入口时控件只绘制、不交互，并在首次调用时输出警告。
 - context 被 Push 时必须显式 Pop；遗漏时帧末仍会结算该 context，但建议严格配对。
 - 键盘输入仍是全局 raylib 宏，`GuiInput` 目前抽象指针/触摸；多 context 同时编辑文本不在支持范围。
-- context 的 `bounds` 只用于输入路由，不自动设置裁剪区域。
+- `inputs[]` 由调用方持有，`GuiBegin()` 到 `GuiEnd()` 期间必须保持有效。
+- 一个 input 同时只应分配给一个 context；重叠窗口请用默认 context + 绘制顺序。
+- `GuiPushContext()` 不再做几何裁剪，调用方自行设置裁剪区域。
 
 ## 9. 变更文件
 

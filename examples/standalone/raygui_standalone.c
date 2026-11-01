@@ -33,7 +33,8 @@ int main()
             IsMouseButtonPressed(0),
             IsMouseButtonReleased(0),
             IsMouseButtonDown(0),
-            0
+            0,
+            false
         };
 
         // Start a gui frame (automatic ids and capture state are rebuilt every frame)

@@ -129,7 +129,7 @@
 *
 *       For a custom input backend inject GuiInput through GuiBegin(inputs, count)/GuiEnd(),
 *       or use GuiBeginFrame()/GuiEndFrame() when the GUI_* input macros are configured.
-*       Independent touch regions use sibling contexts: GuiPushContext(&ctx, bounds) ...
+*       Independent touch regions use sibling contexts: GuiPushContext(&ctx) ...
 *       GuiPopContext(); the default context only consumes the first input.
 *
 *       Rules:
@@ -861,6 +861,7 @@ typedef struct GuiInput {
     bool released;          // Released this frame
     bool down;              // Held down
     int touchId;            // 0 = mouse/primary, 1..N = additional touches
+    bool occupied;          // GUI routing flag: reset by GuiBegin(), set by context routing
 } GuiInput;
 
 typedef enum {
@@ -876,22 +877,12 @@ typedef enum {
 
 typedef struct GuiHitEntry {
     unsigned int id;                // Control id (internal)
-    Rectangle bounds;               // Control bounds for hit tests (internal)
     int dragDirection;              // GuiDragDirection flags supported by the control (internal)
 } GuiHitEntry;
 
 #if !defined(RAYGUI_VALUEBOX_MAX_CHARS)
     #define RAYGUI_VALUEBOX_MAX_CHARS    32      // ValueBox edit buffer size (including terminator)
 #endif
-#if !defined(RAYGUI_MAX_VALUEBOX_BUFFERS)
-    #define RAYGUI_MAX_VALUEBOX_BUFFERS  32      // Persistent text buffers for ValueBox editing
-#endif
-
-// Persistent text buffer used by GuiValueBox while its internal GuiTextBox is edited
-typedef struct GuiValueBoxBuffer {
-    unsigned int id;                // ValueBox id that owns this buffer
-    char text[RAYGUI_VALUEBOX_MAX_CHARS + 1];
-} GuiValueBoxBuffer;
 
 // Isolated interaction context. Zero-initialize before first use and keep it alive while
 // used; do not copy/move it after GuiPushContext() because internal pointers target it.
@@ -902,7 +893,6 @@ typedef struct GuiContext {
     unsigned int tentativeId;       // Press frame candidate (topmost hit)
     unsigned int hoverId;           // Hover target used while drawing this frame
     unsigned int hoverIdNext;       // Resolved at frame end for the next frame
-    unsigned int modalId;           // Editing TextBox / expanded Dropdown
     unsigned int commitId;          // Pending commit delivered on release
     unsigned int frameCounter;      // Frame counter, used to expire stale modals
     unsigned int modalFrame;        // Frame stamp of the last modal registration
@@ -914,20 +904,14 @@ typedef struct GuiContext {
     int pressHitStackCount;
 
     // Pointer / capture state
-    Vector2 pointerPosition;
     Vector2 startPos;
     Vector2 lastPointerPosition;    // Previous frame position (internal)
     Vector2 dragDelta;              // Pointer movement this frame (0 without history)
     bool dragActive;                // Confirmed capture + held + threshold crossed
     bool hasPointerHistory;         // lastPointerPosition is valid for this frame
-    bool inputDown;
-    bool inputPressed;
-    bool inputReleased;
     int dragDirection;              // Arbitration result (GuiDragDirection)
     bool isConfirmed;               // Capture confirmed (threshold or release)
     bool didDrag;                   // Threshold crossed
-    bool pressFrame;
-    bool releaseFrame;
     bool frameTriggered;            // A discrete control already triggered this frame
     unsigned int triggeredId;
 
@@ -936,39 +920,32 @@ typedef struct GuiContext {
     Rectangle currentBounds;
     int currentDirection;
 
-    // Text editing state (single active editor per context, identified by editId)
+    // Active modal control: TextBox/ValueBox editing or Dropdown expanded (one at a time)
     unsigned int editId;
+    bool suppressEditStart;          // A text editor committed this frame; block new editors until next frame
     int textBoxCursorIndex;
     int autoCursorCounter;
-
-    // Dropdown open state (single open popup, identified by dropdownOpenId)
-    unsigned int dropdownOpenId;
-    unsigned int dropdownOpenFrame;
 
     // GuiTextInputBox internal text box id, used to know if its editor is active
     unsigned int dialogTextId;
 
-    // Persistent text buffers for GuiValueBox (keyed by automatic id)
-    GuiValueBoxBuffer valueBoxBuffers[RAYGUI_MAX_VALUEBOX_BUFFERS];
-    int valueBoxBufferCount;
+    // ValueBox text: editText belongs to the active editor, commitText to a pending commit.
+    char editText[RAYGUI_VALUEBOX_MAX_CHARS + 1];
+    char commitText[RAYGUI_VALUEBOX_MAX_CHARS + 1];
+    bool editTextIsValueBox;            // editText belongs to a ValueBox
+    bool commitTextValid;               // commitText holds the pending commit text
 
     // Automatic id assignment
     unsigned int nextId;
     unsigned int scopeId;
     int scopeDepth;
 
-    // Inputs visible to this context (owned by the frame input snapshot)
-    GuiInput *inputs;
-    int inputCount;
-    GuiInput activeInput;           // Input currently driving this context
-    bool hasInput;
-    bool hasTouch;                  // A touch has been routed to this context
-    int touchId;                    // Routed touch id
-    Rectangle bounds;               // Routing bounds passed to GuiPushContext()
+    // Input routed to this context (index into the frame input array)
+    int inputIndex;                 // -1 = no input bound
+    bool hasTouch;                  // This context currently owns inputIndex
 
     // Internal frame bookkeeping
     struct GuiContext *nextFrameContext;
-    bool framePrepared;
     bool inFrame;
 } GuiContext;
 
@@ -1031,7 +1008,7 @@ RAYGUIAPI void GuiSetScissor(Rectangle rect);                   // Clip mouse in
 // disjoint touch regions, not for overlapping layers (routing is first-claim, not z-order).
 // To block a background layer while a popup is open, call GuiLock() before drawing the
 // background and GuiUnlock() before drawing the popup (or draw a fullscreen blocker).
-RAYGUIAPI void GuiBegin(GuiInput *inputs, int inputCount);      // Start a frame; inputs are copied (NULL/0 = no input)
+RAYGUIAPI void GuiBegin(GuiInput *inputs, int inputCount);      // Start a frame; inputs stay caller-owned until GuiEnd()
 RAYGUIAPI void GuiEnd(void);                                    // End the frame and resolve capture/hover for all contexts
 RAYGUIAPI void GuiBeginFrame(void);                             // Start a frame from the configured GUI_* input macros
 RAYGUIAPI void GuiEndFrame(void);                               // End a frame started with GuiBeginFrame()
@@ -1041,10 +1018,9 @@ RAYGUIAPI void GuiEndFromRaylib(void);                          // End a frame s
 // Multiple independent UI regions (for example a left joystick and right buttons).
 // A context is caller-owned and persists across frames: zero-initialize it once, then
 // push/pop it every frame while it is visible. Contexts are siblings, never nested.
-// GuiPushContext() routes one unclaimed touch inside bounds to ctx; that touch stays
-// routed (even outside bounds) until release. bounds uses global coordinates and is
-// only used for routing, not for clipping.
-RAYGUIAPI void GuiPushContext(GuiContext *ctx, Rectangle bounds); // Enter ctx and route one touch to it
+// GuiPushContext() binds ctx to the first input that is not occupied; that input stays
+// with the context until released. Contexts are siblings, never nested.
+RAYGUIAPI void GuiPushContext(GuiContext *ctx);                 // Enter ctx and bind its input by index
 RAYGUIAPI void GuiPopContext(void);                             // Leave the current context (returns to default)
 RAYGUIAPI void GuiCancel(GuiContext *ctx);                      // ctx==NULL: current; silent clear, no results
 RAYGUIAPI void GuiReleaseCapture(GuiContext *ctx);              // ctx==NULL: current; drop capture only
@@ -1053,7 +1029,7 @@ RAYGUIAPI float GuiGetDragThreshold(void);                      // Get global dr
 
 // Queries for the current context
 RAYGUIAPI unsigned int GuiGetCapturedId(void);                  // press: tentative, confirmed: captured, idle: 0
-RAYGUIAPI bool GuiIsEditing(void);                              // Whether this context has an active text editor
+RAYGUIAPI bool GuiIsEditing(void);                              // Whether this context has an active editor or open dropdown
 
 // Tooltips management functions
 RAYGUIAPI void GuiEnableTooltip(void);                          // Enable gui tooltips (global state)
@@ -1779,23 +1755,13 @@ static GuiContext guiDefaultContext = { 0 };
 static GuiContext *guiCurrentContext = &guiDefaultContext;
 #define guiCapture (*guiCurrentContext)
 
-static GuiInput guiFrameInputs[RAYGUI_MAX_INPUTS];   // Inputs injected for this frame
+static GuiInput *guiFrameInputs = NULL;              // Inputs injected for this frame (caller-owned)
 static int guiFrameInputCount = 0;
+static GuiInput guiEmptyInput = { { -1000000.0f, -1000000.0f }, false, false, false, 0, false }; // Fallback when a context has no bound input
 static unsigned int guiFrameCounter = 0;             // Global frame stamp
 static bool guiFrameInProgress = false;
 static GuiContext *guiFrameContextList = NULL;       // Contexts drawn this frame
-static unsigned int guiClaimedInputMask = 0;         // Touch ids already routed this frame
 static float guiDragThreshold = 5.0f;
-
-// Persistent touch -> context routing (a routed touch is not stolen by a sibling context)
-#define RAYGUI_MAX_TOUCH_ROUTES 16
-typedef struct GuiTouchRoute {
-    int touchId;
-    GuiContext *owner;
-} GuiTouchRoute;
-
-static GuiTouchRoute guiTouchRoutes[RAYGUI_MAX_TOUCH_ROUTES];
-static int guiTouchRouteCount = 0;
 
 static bool guiTooltip = false;                 // Tooltip enabled/disabled
 static const char *guiTooltipPtr = NULL;        // Tooltip string pointer (string provided by user)
@@ -2010,25 +1976,26 @@ int GuiGetStyle(int control, int property)
 // NOTE: Controls read the pointer snapshot taken at GuiBegin(), register hits while drawing
 // and only run interaction side effects when their automatic id owns the capture.
 //----------------------------------------------------------------------------------
-static Vector2 GuiPointerPosition(void) { return guiCapture.pointerPosition; }
-static bool GuiIsPointerDown(void) { return guiCapture.inputDown; }
-static bool GuiIsPointerPressed(void) { return guiCapture.inputPressed; }
-static bool GuiIsPointerReleased(void) { return guiCapture.inputReleased; }
+static GuiInput *GuiContextInput(GuiContext *ctx);
+
+static Vector2 GuiPointerPosition(void) { return GuiContextInput(guiCurrentContext)->position; }
+static bool GuiIsPointerDown(void) { return GuiContextInput(guiCurrentContext)->down; }
+static bool GuiIsPointerPressed(void) { return GuiContextInput(guiCurrentContext)->pressed; }
+static bool GuiIsPointerReleased(void) { return GuiContextInput(guiCurrentContext)->released; }
 
 // Check if the pointer is inside the given bounds (respecting the scissor rectangle)
 static bool GuiHitTest(Rectangle bounds)
 {
-    return CheckScissorCollisionPointRec(guiCapture.pointerPosition, bounds);
+    return CheckScissorCollisionPointRec(GuiContextInput(guiCurrentContext)->position, bounds);
 }
 
 // Register a hit entry in the current frame hit stack
-static void GuiAddHit(unsigned int id, Rectangle bounds, int dragDirection)
+static void GuiAddHit(unsigned int id, int dragDirection)
 {
     if (guiCapture.hitStackCount >= RAYGUI_MAX_HIT_STACK) return; // Stack full: drop extra hits
 
     GuiHitEntry *entry = &guiCapture.hitStack[guiCapture.hitStackCount];
     entry->id = id;
-    entry->bounds = bounds;
     entry->dragDirection = dragDirection;
     guiCapture.hitStackCount++;
 }
@@ -2047,13 +2014,13 @@ static void GuiControlBegin(Rectangle bounds, int dragDirection)
     GuiNextControlId();
     guiCapture.currentBounds = bounds;
     guiCapture.currentDirection = dragDirection;
-    if (GuiHitTest(bounds)) GuiAddHit(guiCapture.currentId, bounds, dragDirection);
+    if (GuiHitTest(bounds)) GuiAddHit(guiCapture.currentId, dragDirection);
 }
 
 // Register an additional hit region for the current control (for example a selector button)
 static void GuiRegisterCurrentHit(Rectangle bounds)
 {
-    if (GuiHitTest(bounds)) GuiAddHit(guiCapture.currentId, bounds, guiCapture.currentDirection);
+    if (GuiHitTest(bounds)) GuiAddHit(guiCapture.currentId, guiCapture.currentDirection);
 }
 
 // Check if the current control owns the confirmed capture
@@ -2073,38 +2040,20 @@ static bool GuiIsHovered(void)
 // Check if the current control is the active modal control
 static bool GuiIsModal(void)
 {
-    return (guiCapture.currentId != 0) && (guiCapture.currentId == guiCapture.modalId);
+    return (guiCapture.currentId != 0) && (guiCapture.currentId == guiCapture.editId);
 }
 
 // Register the current control as modal (editing TextBox or expanded Dropdown)
 static void GuiSetModal(void)
 {
-    guiCapture.modalId = guiCapture.currentId;
+    guiCapture.editId = guiCapture.currentId;
     guiCapture.modalFrame = guiCapture.frameCounter;
 }
 
 // Clear the current control modal state
 static void GuiClearModal(void)
 {
-    if (guiCapture.modalId == guiCapture.currentId) guiCapture.modalId = 0;
-}
-
-// Get (or allocate) the persistent text buffer for a ValueBox
-static GuiValueBoxBuffer *GuiGetValueBoxBuffer(unsigned int id)
-{
-    for (int i = 0; i < guiCapture.valueBoxBufferCount; i++)
-    {
-        if (guiCapture.valueBoxBuffers[i].id == id) return &guiCapture.valueBoxBuffers[i];
-    }
-
-    if (guiCapture.valueBoxBufferCount >= RAYGUI_MAX_VALUEBOX_BUFFERS) return NULL;
-
-    GuiValueBoxBuffer *buffer = &guiCapture.valueBoxBuffers[guiCapture.valueBoxBufferCount];
-    buffer->id = id;
-    buffer->text[0] = '\0';
-    guiCapture.valueBoxBufferCount++;
-
-    return buffer;
+    if (guiCapture.editId == guiCapture.currentId) guiCapture.editId = 0;
 }
 
 // Enter text edit mode for the current control
@@ -2113,7 +2062,18 @@ static GuiValueBoxBuffer *GuiGetValueBoxBuffer(unsigned int id)
 static void GuiBeginTextEdit(int cursorIndex)
 {
     if ((guiCapture.editId != 0) && (guiCapture.editId != guiCapture.currentId))
+    {
         guiCapture.commitId = guiCapture.editId;
+
+        // Preserve the old ValueBox text before the new editor takes over editText.
+        // Normal TextBox controls keep their text in the caller buffer, so only copy when
+        // the previous editor was a ValueBox.
+        if (guiCapture.editTextIsValueBox)
+        {
+            memcpy(guiCapture.commitText, guiCapture.editText, sizeof(guiCapture.commitText));
+            guiCapture.commitTextValid = true;
+        }
+    }
 
     guiCapture.editId = guiCapture.currentId;
     guiCapture.textBoxCursorIndex = cursorIndex;
@@ -2133,15 +2093,15 @@ static bool GuiHitControl(void)
     if (GuiIsModal()) return true;
 
     // Press frame only registers capture candidates, no side effects
-    if (guiCapture.inputPressed) return false;
+    if (GuiContextInput(guiCurrentContext)->pressed) return false;
 
-    if (guiCapture.inputDown)
+    if (GuiContextInput(guiCurrentContext)->down)
     {
         if (!guiCapture.isConfirmed) return false;    // Drag threshold not reached yet
         return (id == guiCapture.capturedId);
     }
 
-    if (guiCapture.inputReleased)
+    if (GuiContextInput(guiCurrentContext)->released)
     {
         if (!guiCapture.isConfirmed) return false;
         if (id != guiCapture.capturedId) return false;
@@ -2165,7 +2125,7 @@ static bool GuiCanInteract(void)
     if (id == 0) return false;
     if (guiLocked) return false;
     if (GuiIsModal()) return true;
-    if (guiCapture.inputPressed) return false;
+    if (GuiContextInput(guiCurrentContext)->pressed) return false;
     if (!guiCapture.isConfirmed) return false;
 
     return (id == guiCapture.capturedId);
@@ -2198,7 +2158,8 @@ static void GuiResetContextState(GuiContext *ctx)
     ctx->tentativeId = 0;
     ctx->hoverId = 0;
     ctx->hoverIdNext = 0;
-    ctx->modalId = 0;
+    ctx->editId = 0;
+    ctx->suppressEditStart = false;
     ctx->commitId = 0;
     ctx->modalFrame = 0;
     ctx->hitStackCount = 0;
@@ -2209,173 +2170,81 @@ static void GuiResetContextState(GuiContext *ctx)
     ctx->dragActive = false;
     ctx->dragDelta = RAYGUI_CLITERAL(Vector2){ 0.0f, 0.0f };
     ctx->hasPointerHistory = false;
-    ctx->pressFrame = false;
-    ctx->releaseFrame = false;
     ctx->frameTriggered = false;
     ctx->triggeredId = 0;
-    ctx->editId = 0;
-    ctx->dropdownOpenId = 0;
-    ctx->dropdownOpenFrame = 0;
     ctx->textBoxCursorIndex = 0;
     ctx->autoCursorCounter = 0;
-    ctx->valueBoxBufferCount = 0;
+    ctx->editText[0] = '\0';
+    ctx->commitText[0] = '\0';
+    ctx->editTextIsValueBox = false;
+    ctx->commitTextValid = false;
+    ctx->inputIndex = -1;
+    ctx->hasTouch = false;
 }
 
-// Get the context that currently owns a routed touch
-static GuiContext *GuiGetTouchOwner(int touchId)
+// Get the input bound to a context (empty input when none)
+static GuiInput *GuiContextInput(GuiContext *ctx)
 {
-    for (int i = 0; i < guiTouchRouteCount; i++)
-    {
-        if (guiTouchRoutes[i].touchId == touchId)
-        {
-            GuiContext *owner = guiTouchRoutes[i].owner;
-
-            // Drop stale routes whose context is no longer routing the touch
-            if ((owner == NULL) || !owner->hasTouch)
-            {
-                for (int j = i; j < (guiTouchRouteCount - 1); j++) guiTouchRoutes[j] = guiTouchRoutes[j + 1];
-                guiTouchRouteCount--;
-                return NULL;
-            }
-
-            return owner;
-        }
-    }
-
-    return NULL;
+    if ((ctx->inputIndex >= 0) && (ctx->inputIndex < guiFrameInputCount)) return &guiFrameInputs[ctx->inputIndex];
+    return &guiEmptyInput;
 }
 
-// Record that a context owns a routed touch
-static void GuiSetTouchOwner(int touchId, GuiContext *owner)
+// Bind the first available input to a pushed context.
+// A context that already owns a held input keeps it; otherwise prefer a pressed/held
+// free input, then fall back to any free input (hover). Occupation is decided by Pop.
+static void GuiSelectContextInput(GuiContext *ctx)
 {
-    for (int i = 0; i < guiTouchRouteCount; i++)
-    {
-        if (guiTouchRoutes[i].touchId == touchId)
-        {
-            guiTouchRoutes[i].owner = owner;
-            return;
-        }
-    }
-
-    if (guiTouchRouteCount < RAYGUI_MAX_TOUCH_ROUTES)
-    {
-        guiTouchRoutes[guiTouchRouteCount].touchId = touchId;
-        guiTouchRoutes[guiTouchRouteCount].owner = owner;
-        guiTouchRouteCount++;
-    }
-}
-
-// Remove all routed touches for a context
-static void GuiClearTouchOwner(GuiContext *owner)
-{
-    for (int i = 0; i < guiTouchRouteCount; )
-    {
-        if (guiTouchRoutes[i].owner == owner)
-        {
-            for (int j = i; j < (guiTouchRouteCount - 1); j++) guiTouchRoutes[j] = guiTouchRoutes[j + 1];
-            guiTouchRouteCount--;
-        }
-        else i++;
-    }
-}
-
-// Pick the input that drives a pushed context. A context keeps its routed touch until it
-// is released; otherwise the first unclaimed touch inside the context bounds is used.
-static void GuiSelectContextInput(GuiContext *ctx, Rectangle bounds)
-{
-    GuiInput selected = ctx->activeInput;
-    bool found = false;
-
     if (ctx->hasTouch)
     {
-        for (int i = 0; i < guiFrameInputCount; i++)
+        if ((ctx->inputIndex >= 0) && (ctx->inputIndex < guiFrameInputCount))
         {
-            if (guiFrameInputs[i].touchId == ctx->touchId)
-            {
-                selected = guiFrameInputs[i];
-                guiClaimedInputMask |= (1u << i);
-                GuiSetTouchOwner(ctx->touchId, ctx);
-                found = true;
-                break;
-            }
+            // Continuing an existing touch: reserve it for this context while it is held
+            if (!guiFrameInputs[ctx->inputIndex].released) guiFrameInputs[ctx->inputIndex].occupied = true;
+            return;
         }
 
-        // The caller omitted the release event: synthesize one so capture cannot stick
-        if (!found)
-        {
-            selected = ctx->activeInput;
-            selected.pressed = false;
-            selected.down = false;
-            selected.released = true;
-            found = true;
-        }
+        // The bound input disappeared: drop the binding instead of stealing a new touch
+        ctx->inputIndex = -1;
+        ctx->hasTouch = false;
+        return;
     }
-    else
+
+    ctx->inputIndex = -1;
+
+    // First pass: a free input that is actually pressed/held
+    for (int i = 0; i < guiFrameInputCount; i++)
     {
-        for (int i = 0; i < guiFrameInputCount; i++)
-        {
-            if ((guiClaimedInputMask & (1u << i)) != 0) continue;
+        if (guiFrameInputs[i].occupied) continue;
+        if (!guiFrameInputs[i].pressed && !guiFrameInputs[i].down) continue;
 
-            GuiContext *owner = GuiGetTouchOwner(guiFrameInputs[i].touchId);
-            if ((owner != NULL) && (owner != ctx)) continue;
-
-            if (CheckCollisionPointRec(guiFrameInputs[i].position, bounds))
-            {
-                selected = guiFrameInputs[i];
-                ctx->touchId = selected.touchId;
-                ctx->hasTouch = true;
-                guiClaimedInputMask |= (1u << i);
-                GuiSetTouchOwner(ctx->touchId, ctx);
-                found = true;
-                break;
-            }
-        }
+        ctx->inputIndex = i;
+        return;
     }
 
-    if (!found)
+    // Second pass: idle input, used for hover
+    for (int i = 0; i < guiFrameInputCount; i++)
     {
-        selected.position = RAYGUI_CLITERAL(Vector2){ -1000000.0f, -1000000.0f };
-        selected.pressed = false;
-        selected.released = false;
-        selected.down = false;
-    }
+        if (guiFrameInputs[i].occupied) continue;
 
-    ctx->activeInput = selected;
-    ctx->inputs = &ctx->activeInput;
-    ctx->inputCount = found? 1 : 0;
-    ctx->hasInput = found;
+        ctx->inputIndex = i;
+        return;
+    }
 }
 
 // Default single-context routing: only the first input is used
 static void GuiSelectDefaultInput(GuiContext *ctx)
 {
-    if (guiFrameInputCount > 0)
-    {
-        ctx->activeInput = guiFrameInputs[0];
-        ctx->hasInput = true;
-    }
-    else
-    {
-        ctx->activeInput.position = RAYGUI_CLITERAL(Vector2){ -1000000.0f, -1000000.0f };
-        ctx->activeInput.pressed = false;
-        ctx->activeInput.released = false;
-        ctx->activeInput.down = false;
-        ctx->activeInput.touchId = 0;
-        ctx->hasInput = false;
-    }
-
-    ctx->inputs = &ctx->activeInput;
-    ctx->inputCount = ctx->hasInput? 1 : 0;
+    ctx->inputIndex = (guiFrameInputCount > 0)? 0 : -1;
 }
 
 // Rebuild a context for the current frame and run the press/release/arbitration state machine
 static void GuiPrepareContext(GuiContext *ctx)
 {
+    GuiInput *input = GuiContextInput(ctx);
     unsigned int previousFrame = ctx->frameCounter;
     bool wasDragActive = ctx->dragActive;
 
     ctx->inFrame = true;
-    ctx->framePrepared = true;
     ctx->frameCounter = guiFrameCounter;
     ctx->nextId = 1;
     ctx->scopeDepth = 0;
@@ -2383,17 +2252,12 @@ static void GuiPrepareContext(GuiContext *ctx)
     ctx->currentId = 0;
     ctx->frameTriggered = false;
     ctx->triggeredId = 0;
-    ctx->pressFrame = false;
-    ctx->releaseFrame = false;
+    ctx->suppressEditStart = false;
     ctx->dragActive = false;
 
-    // No editor and no pending commit: ValueBox text buffers are rebuilt from values
-    if ((ctx->editId == 0) && (ctx->commitId == 0)) ctx->valueBoxBufferCount = 0;
-
-    ctx->pointerPosition = ctx->activeInput.position;
-    ctx->inputPressed = ctx->activeInput.pressed;
-    ctx->inputReleased = ctx->activeInput.released;
-    ctx->inputDown = ctx->activeInput.down;
+    // ValueBox text ownership only survives while there is an editor or pending commit
+    if (ctx->commitId == 0) ctx->commitTextValid = false;
+    if (ctx->editId == 0) ctx->editTextIsValueBox = false;
 
     // Drag delta is input-layer state: controls only read it instead of tracking history.
     // A context that was not prepared on the previous frame starts a fresh history.
@@ -2403,33 +2267,27 @@ static void GuiPrepareContext(GuiContext *ctx)
     ctx->dragDelta = RAYGUI_CLITERAL(Vector2){ 0.0f, 0.0f };
     if (ctx->hasPointerHistory)
     {
-        ctx->dragDelta.x = ctx->pointerPosition.x - ctx->lastPointerPosition.x;
-        ctx->dragDelta.y = ctx->pointerPosition.y - ctx->lastPointerPosition.y;
+        ctx->dragDelta.x = input->position.x - ctx->lastPointerPosition.x;
+        ctx->dragDelta.y = input->position.y - ctx->lastPointerPosition.y;
     }
 
-    ctx->lastPointerPosition = ctx->pointerPosition;
+    ctx->lastPointerPosition = input->position;
     ctx->hasPointerHistory = true;
 
     ctx->hoverId = (ctx->capturedId != 0)? ctx->capturedId : ctx->hoverIdNext;
 
-    if (ctx->inputPressed)
+    if (input->pressed)
     {
-        ctx->pressFrame = true;
-        ctx->startPos = ctx->pointerPosition;
-        ctx->tentativeId = ctx->modalId;
+        ctx->startPos = input->position;
+        ctx->tentativeId = ctx->editId;
         ctx->capturedId = 0;
         ctx->isConfirmed = false;
         ctx->didDrag = false;
         ctx->dragDirection = GUI_DRAG_NONE;
         ctx->pressHitStackCount = 0;
-
-        // Same frame press + release cannot be delivered as an interaction
-        if (ctx->inputReleased) ctx->releaseFrame = true;
     }
-    else if (ctx->inputReleased)
+    else if (input->released)
     {
-        ctx->releaseFrame = true;
-
         // Release before the drag threshold: the topmost hit becomes a click
         if (!ctx->isConfirmed)
         {
@@ -2437,15 +2295,15 @@ static void GuiPrepareContext(GuiContext *ctx)
             ctx->isConfirmed = true;
         }
     }
-    else if (ctx->inputDown && (ctx->tentativeId != 0) && !ctx->isConfirmed)
+    else if (input->down && (ctx->tentativeId != 0) && !ctx->isConfirmed)
     {
         // Modal controls keep the capture regardless of movement; a pending text commit
         // (outside press) also blocks direction arbitration until release
-        if (((ctx->modalId != 0) && (ctx->tentativeId == ctx->modalId)) ||
+        if (((ctx->editId != 0) && (ctx->tentativeId == ctx->editId)) ||
             (ctx->commitId != 0)) return;
 
-        float dx = ctx->pointerPosition.x - ctx->startPos.x;
-        float dy = ctx->pointerPosition.y - ctx->startPos.y;
+        float dx = input->position.x - ctx->startPos.x;
+        float dy = input->position.y - ctx->startPos.y;
 
         if ((dx*dx + dy*dy) >= (guiDragThreshold*guiDragThreshold))
         {
@@ -2471,7 +2329,7 @@ static void GuiPrepareContext(GuiContext *ctx)
             ctx->isConfirmed = true;
         }
     }
-    else if (!ctx->inputDown)
+    else if (!input->down)
     {
         ctx->capturedId = 0;
         ctx->tentativeId = 0;
@@ -2483,14 +2341,14 @@ static void GuiPrepareContext(GuiContext *ctx)
     }
 
     // A drag is active only after arbitration confirmed an owner and the pointer is still held
-    ctx->dragActive = ctx->isConfirmed && ctx->inputDown && ctx->didDrag;
+    ctx->dragActive = ctx->isConfirmed && input->down && ctx->didDrag;
 
     // On the first active frame include the movement spent before the threshold, so the
     // content follows the whole gesture instead of losing the first few pixels.
     if (ctx->dragActive && !wasDragActive)
     {
-        ctx->dragDelta.x = ctx->pointerPosition.x - ctx->startPos.x;
-        ctx->dragDelta.y = ctx->pointerPosition.y - ctx->startPos.y;
+        ctx->dragDelta.x = input->position.x - ctx->startPos.x;
+        ctx->dragDelta.y = input->position.y - ctx->startPos.y;
     }
 }
 
@@ -2499,7 +2357,9 @@ static void GuiFinalizeContext(GuiContext *ctx)
 {
     if (!ctx->inFrame) return;
 
-    if (ctx->pressFrame)
+    GuiInput *input = GuiContextInput(ctx);
+
+    if (input->pressed)
     {
         ctx->pressHitStackCount = ctx->hitStackCount;
         for (int i = 0; i < ctx->hitStackCount; i++) ctx->pressHitStack[i] = ctx->hitStack[i];
@@ -2509,30 +2369,21 @@ static void GuiFinalizeContext(GuiContext *ctx)
             ctx->tentativeId = ctx->hitStack[ctx->hitStackCount - 1].id;
     }
 
-    // Drop modals that were not drawn during this frame; the active text editor goes with it
-    if ((ctx->modalId != 0) && (ctx->modalFrame != ctx->frameCounter))
+    // Drop the active editor/dropdown if its control was not drawn this frame
+    if ((ctx->editId != 0) && (ctx->modalFrame != ctx->frameCounter))
     {
-        ctx->modalId = 0;
         ctx->editId = 0;
+        ctx->editTextIsValueBox = false;
     }
-
-    // Dropdown popups expire when their control is no longer drawn
-    if ((ctx->dropdownOpenId != 0) && (ctx->dropdownOpenFrame != ctx->frameCounter))
-        ctx->dropdownOpenId = 0;
 
     if (ctx->capturedId != 0) ctx->hoverIdNext = ctx->capturedId;
     else if (ctx->hitStackCount > 0) ctx->hoverIdNext = ctx->hitStack[ctx->hitStackCount - 1].id;
     else ctx->hoverIdNext = 0;
 
-    // A released/missing touch stops being routed to this context
-    if (!ctx->activeInput.down && !ctx->activeInput.pressed)
-    {
-        ctx->hasTouch = false;
-        GuiClearTouchOwner(ctx);
-    }
+    // A released/missing touch stops being held by this context
+    if (!input->down && !input->pressed) ctx->hasTouch = false;
 
     ctx->inFrame = false;
-    ctx->framePrepared = false;
     ctx->currentId = 0;
     ctx->scopeDepth = 0;
 }
@@ -2550,8 +2401,8 @@ static void GuiAddFrameContext(GuiContext *ctx)
 }
 
 // Start a frame with explicit inputs
-// NOTE: inputs[] is copied; inputCount is capped to RAYGUI_MAX_INPUTS. The default
-// context uses only inputs[0]. Extra inputs are available to GuiPushContext() scopes.
+// NOTE: inputs[] is owned by the caller and must stay valid until GuiEnd(). Its occupied
+// flags are reset here. The default context uses only inputs[0].
 void GuiBegin(GuiInput *inputs, int inputCount)
 {
     if (guiFrameInProgress)
@@ -2560,16 +2411,19 @@ void GuiBegin(GuiInput *inputs, int inputCount)
         GuiEnd();
     }
 
+    guiFrameInputs = inputs;
     guiFrameInputCount = 0;
+
     if (inputs != NULL)
     {
         if (inputCount > RAYGUI_MAX_INPUTS) inputCount = RAYGUI_MAX_INPUTS;
-        for (int i = 0; i < inputCount; i++) guiFrameInputs[i] = inputs[i];
-        guiFrameInputCount = (inputCount > 0)? inputCount : 0;
+        if (inputCount < 0) inputCount = 0;
+
+        for (int i = 0; i < inputCount; i++) inputs[i].occupied = false;
+        guiFrameInputCount = inputCount;
     }
 
     guiFrameCounter++;
-    guiClaimedInputMask = 0;
     guiFrameContextList = NULL;
     guiFrameInProgress = true;
 
@@ -2580,9 +2434,9 @@ void GuiBegin(GuiInput *inputs, int inputCount)
 }
 
 // Enter an isolated context; contexts are siblings, nesting is not allowed
-// bounds is in global coordinates and is used only to route an unclaimed touch to ctx.
-// The routed touch stays with ctx until release, even if it leaves bounds.
-void GuiPushContext(GuiContext *ctx, Rectangle bounds)
+// The context takes the first input that is not occupied. It keeps that input while held;
+// GuiPopContext() marks it occupied or releases it on the release frame.
+void GuiPushContext(GuiContext *ctx)
 {
     if (!guiFrameInProgress)
     {
@@ -2602,11 +2456,10 @@ void GuiPushContext(GuiContext *ctx, Rectangle bounds)
         return;
     }
 
-    ctx->bounds = bounds;
     guiCurrentContext = ctx;
-    GuiSelectContextInput(ctx, bounds);
+    GuiSelectContextInput(ctx);
 
-    if (!ctx->framePrepared || !ctx->inFrame || (ctx->frameCounter != guiFrameCounter))
+    if (!ctx->inFrame || (ctx->frameCounter != guiFrameCounter))
     {
         GuiPrepareContext(ctx);
         GuiAddFrameContext(ctx);
@@ -2614,20 +2467,36 @@ void GuiPushContext(GuiContext *ctx, Rectangle bounds)
 }
 
 // Leave the current context and return to the default one
-// NOTE: Capture and edit state remain in the context for the next frame; only the
-// current frame's visible input set is cleared.
+// The bound input is marked occupied while held; on its release frame it is handed back.
 void GuiPopContext(void)
 {
-    if (guiCurrentContext == &guiDefaultContext)
+    GuiContext *ctx = guiCurrentContext;
+
+    if (ctx == &guiDefaultContext)
     {
         RAYGUI_LOG("WARNING: GuiPopContext() called without a matching GuiPushContext()\n");
         return;
     }
 
-    // The context keeps its capture, but its visible input set belongs to the popped scope
-    guiCurrentContext->inputs = NULL;
-    guiCurrentContext->inputCount = 0;
-    guiCurrentContext->hasInput = false;
+    if ((ctx->inputIndex >= 0) && (ctx->inputIndex < guiFrameInputCount))
+    {
+        GuiInput *input = &guiFrameInputs[ctx->inputIndex];
+
+        input->occupied = !input->released;
+
+        if (input->released)
+        {
+            ctx->hasTouch = false;
+            ctx->inputIndex = -1;
+        }
+        else ctx->hasTouch = true;
+    }
+    else
+    {
+        ctx->hasTouch = false;
+        ctx->inputIndex = -1;
+    }
+
     guiCurrentContext = &guiDefaultContext;
 }
 
@@ -2645,21 +2514,21 @@ void GuiEnd(void)
 
     guiFrameContextList = NULL;
     guiFrameInProgress = false;
+    guiFrameInputs = NULL;
     guiFrameInputCount = 0;
-    guiClaimedInputMask = 0;
     guiCurrentContext = &guiDefaultContext;
 }
 
 // Start a frame from GUI_POINTER_POSITION / GUI_BUTTON_* backend macros
 void GuiBeginFrame(void)
 {
-    GuiInput input = {
-        GUI_POINTER_POSITION,
-        (GUI_BUTTON_PRESSED)? true : false,
-        (GUI_BUTTON_RELEASED)? true : false,
-        (GUI_BUTTON_DOWN)? true : false,
-        0
-    };
+    static GuiInput input;
+    input.position = GUI_POINTER_POSITION;
+    input.pressed = (GUI_BUTTON_PRESSED)? true : false;
+    input.released = (GUI_BUTTON_RELEASED)? true : false;
+    input.down = (GUI_BUTTON_DOWN)? true : false;
+    input.touchId = 0;
+    input.occupied = false;
 
     GuiBegin(&input, 1);
 }
@@ -2673,7 +2542,7 @@ void GuiEndFrame(void)
 // Start a frame from raylib mouse/touch input
 void GuiBeginFromRaylib(void)
 {
-    GuiInput inputs[RAYGUI_MAX_INPUTS] = { 0 };
+    static GuiInput inputs[RAYGUI_MAX_INPUTS];
     int count = 0;
 
 #if !defined(RAYGUI_STANDALONE)
@@ -2795,14 +2664,9 @@ void GuiCancel(GuiContext *ctx)
     if (ctx == NULL) ctx = guiCurrentContext;
 
     GuiResetContextState(ctx);
-    GuiClearTouchOwner(ctx);
-    ctx->inputs = NULL;
-    ctx->inputCount = 0;
-    ctx->hasInput = false;
     ctx->hasTouch = false;
-    ctx->touchId = 0;
+    ctx->inputIndex = -1;
     ctx->inFrame = false;
-    ctx->framePrepared = false;
 }
 
 // Release the capture without triggering the captured control
@@ -2843,8 +2707,9 @@ unsigned int GuiGetCapturedId(void)
     return guiCapture.tentativeId;
 }
 
-// Check whether the current context has an active text editor
-// NOTE: keyboard input is global; do not edit text in two contexts simultaneously.
+// Check whether the current context has an active editor or open dropdown
+// NOTE: editId is the single active/modal control id for both cases; use the control's
+// own state if the distinction matters.
 bool GuiIsEditing(void)
 {
     return (guiCapture.editId != 0);
@@ -3089,7 +2954,7 @@ int GuiScrollPanel(Rectangle bounds, const char *text, Rectangle content, Vector
         }
 
         // Wheel scrolling is independent from capture, only blocked by modals and drags
-        if (!guiLocked && GuiHitTest(bounds) && (guiCapture.modalId == 0) &&
+        if (!guiLocked && GuiHitTest(bounds) && (guiCapture.editId == 0) &&
             ((guiCapture.capturedId == 0) || (guiCapture.capturedId == panelId)))
         {
 #if defined(SUPPORT_SCROLLBAR_KEY_INPUT)
@@ -3655,7 +3520,7 @@ int GuiDropdownBox(Rectangle bounds, const char *text, int *active)
     //--------------------------------------------------------------------
     GuiControlBegin(bounds, GUI_DRAG_NONE);
     unsigned int dropdownId = guiCapture.currentId;
-    bool expanded = (guiCapture.dropdownOpenId == dropdownId);
+    bool expanded = (guiCapture.editId == dropdownId);
 
     if ((state != STATE_DISABLED) && (itemCount > 1))
     {
@@ -3665,7 +3530,7 @@ int GuiDropdownBox(Rectangle bounds, const char *text, int *active)
         {
             // Dropdown is modal while open: it owns the press even outside its bounds,
             // so the underlying controls are not activated when it closes
-            guiCapture.dropdownOpenFrame = guiCapture.frameCounter;
+            guiCapture.modalFrame = guiCapture.frameCounter;
             GuiSetModal();
             state = STATE_PRESSED;
 
@@ -3689,7 +3554,7 @@ int GuiDropdownBox(Rectangle bounds, const char *text, int *active)
             {
                 if (itemFocused >= 0) itemSelected = itemFocused;
 
-                guiCapture.dropdownOpenId = 0;
+                guiCapture.editId = 0;
                 expanded = false;
                 GuiClearModal();
 
@@ -3700,8 +3565,8 @@ int GuiDropdownBox(Rectangle bounds, const char *text, int *active)
         {
             if (GuiHitControl() && GuiIsPointerReleased())
             {
-                guiCapture.dropdownOpenId = dropdownId;
-                guiCapture.dropdownOpenFrame = guiCapture.frameCounter;
+                guiCapture.editId = dropdownId;
+                guiCapture.modalFrame = guiCapture.frameCounter;
                 expanded = true;
                 GuiSetModal();
 
@@ -3822,7 +3687,7 @@ static int GuiTextBoxStyled(Rectangle bounds, char *text, int textSize, int styl
     GuiControlBegin(bounds, GUI_DRAG_NONE);
 
     bool hit = GuiHitTest(bounds);
-    bool editing = (guiCapture.editId == guiCapture.currentId) && (guiCapture.modalId == guiCapture.currentId);
+    bool editing = (guiCapture.editId == guiCapture.currentId) && (guiCapture.editId == guiCapture.currentId);
     // Locking freezes the whole update section; the editor is still drawn
     if (!guiLocked)
     {
@@ -3835,12 +3700,15 @@ static int GuiTextBoxStyled(Rectangle bounds, char *text, int textSize, int styl
     }
 
     // Press inside a non-editing text box starts editing and places the cursor at the end
-    if (!editing && hit && GuiIsPointerPressed() && !readOnly)
+    if (!editing && (guiCapture.editId == 0) && !guiCapture.suppressEditStart && hit && GuiIsPointerPressed() && !readOnly)
     {
         GuiBeginTextEdit(textLength);
         textBoxCursorIndex = textLength;
         autoCursorCounter = 0;
         editing = true;
+
+        // editText only belongs to ValueBox; a normal TextBox uses the caller buffer
+        if (styleControl != VALUEBOX) guiCapture.editTextIsValueBox = false;
     }
 
     if ((state != STATE_DISABLED) &&                // Control not disabled
@@ -3856,6 +3724,7 @@ static int GuiTextBoxStyled(Rectangle bounds, char *text, int textSize, int styl
             {
                 guiCapture.editId = 0;
                 guiCapture.commitId = guiCapture.currentId;
+                guiCapture.suppressEditStart = true;
 
                 textBoxCursorIndex = 0;
                 autoCursorCounter = 0;
@@ -4220,6 +4089,7 @@ static int GuiTextBoxStyled(Rectangle bounds, char *text, int textSize, int styl
                 autoCursorCounter = 0;      // GLOBAL: Reset counter for repeated keystrokes
 
                 guiCapture.editId = 0;
+                guiCapture.suppressEditStart = true;
                 GuiClearModal();
                 editing = false;
 
@@ -4398,12 +4268,13 @@ int GuiValueBox(Rectangle bounds, const char *text, int *value, int minValue, in
     GuiControlBegin(bounds, GUI_DRAG_NONE);
     unsigned int id = guiCapture.currentId;
 
-    GuiValueBoxBuffer *buffer = GuiGetValueBoxBuffer(id);
     char localText[RAYGUI_VALUEBOX_MAX_CHARS + 1] = { 0 };
-    char *valueText = (buffer != NULL)? buffer->text : localText;
-
     bool editing = (guiCapture.editId == id);
     bool pendingCommit = (guiCapture.commitId == id);
+
+    char *valueText = localText;
+    if (editing) valueText = guiCapture.editText;
+    else if (pendingCommit) valueText = guiCapture.commitText;
 
     // While editing (or waiting to deliver a commit) keep the user text; otherwise mirror the value
     if (!editing && !pendingCommit)
@@ -4428,6 +4299,27 @@ int GuiValueBox(Rectangle bounds, const char *text, int *value, int minValue, in
 
     GuiSetStyle(VALUEBOX, TEXT_ALIGNMENT, prevAlignment);
 
+    // This ValueBox just started editing: move the local text into editText
+    if (!editing && (guiCapture.editId == id))
+    {
+        memcpy(guiCapture.editText, valueText, RAYGUI_VALUEBOX_MAX_CHARS + 1);
+        guiCapture.editTextIsValueBox = true;
+        valueText = guiCapture.editText;
+    }
+
+    // Outside press: preserve the edited text for the release-frame commit. This also
+    // covers a focus switch where GuiBeginTextEdit() already copied it.
+    if (guiCapture.commitId == id)
+    {
+        if (!guiCapture.commitTextValid)
+        {
+            memcpy(guiCapture.commitText, valueText, RAYGUI_VALUEBOX_MAX_CHARS + 1);
+            guiCapture.commitTextValid = true;
+        }
+
+        valueText = guiCapture.commitText;
+    }
+
     // Parse only on commit; invalid text keeps the previous value
     if (result == RESULT_PRESSED)
     {
@@ -4444,6 +4336,8 @@ int GuiValueBox(Rectangle bounds, const char *text, int *value, int minValue, in
                 else if (*value < minValue) *value = minValue;
             }
         }
+
+        guiCapture.commitTextValid = false;
     }
 
     // Draw text label if provided
@@ -4478,12 +4372,13 @@ int GuiValueBoxFloat(Rectangle bounds, const char *text, float *value, float min
     GuiControlBegin(bounds, GUI_DRAG_NONE);
     unsigned int id = guiCapture.currentId;
 
-    GuiValueBoxBuffer *buffer = GuiGetValueBoxBuffer(id);
     char localText[RAYGUI_VALUEBOX_MAX_CHARS + 1] = { 0 };
-    char *valueText = (buffer != NULL)? buffer->text : localText;
-
     bool editing = (guiCapture.editId == id);
     bool pendingCommit = (guiCapture.commitId == id);
+
+    char *valueText = localText;
+    if (editing) valueText = guiCapture.editText;
+    else if (pendingCommit) valueText = guiCapture.commitText;
 
     // While editing (or waiting to deliver a commit) keep the user text; otherwise mirror the value
     if (!editing && !pendingCommit)
@@ -4508,6 +4403,26 @@ int GuiValueBoxFloat(Rectangle bounds, const char *text, float *value, float min
 
     GuiSetStyle(VALUEBOX, TEXT_ALIGNMENT, prevAlignment);
 
+    // This ValueBox just started editing: move the local text into editText
+    if (!editing && (guiCapture.editId == id))
+    {
+        memcpy(guiCapture.editText, valueText, RAYGUI_VALUEBOX_MAX_CHARS + 1);
+        guiCapture.editTextIsValueBox = true;
+        valueText = guiCapture.editText;
+    }
+
+    // Outside press: preserve the edited text for the release-frame commit
+    if (guiCapture.commitId == id)
+    {
+        if (!guiCapture.commitTextValid)
+        {
+            memcpy(guiCapture.commitText, valueText, RAYGUI_VALUEBOX_MAX_CHARS + 1);
+            guiCapture.commitTextValid = true;
+        }
+
+        valueText = guiCapture.commitText;
+    }
+
     // Parse only on commit; invalid text keeps the previous value
     if (result == RESULT_PRESSED)
     {
@@ -4524,6 +4439,8 @@ int GuiValueBoxFloat(Rectangle bounds, const char *text, float *value, float min
                 else if (*value < minValue) *value = minValue;
             }
         }
+
+        guiCapture.commitTextValid = false;
     }
 
     // Draw text label if provided

@@ -751,6 +751,124 @@ static void TestValueBoxLimits(void)
     CHECK(gUnboundedValue == 5001, "value box does not clamp on commit when maxValue <= minValue");
 }
 
+static int gPendingA = 10;
+static int gPendingB = 20;
+
+static void DrawReverseValueBoxes(void)
+{
+    // B is drawn first on purpose: A switches focus to B before A processes its own commit
+    GuiValueBox(RAYGUI_CLITERAL(Rectangle){ 0, 40, 120, 30 }, NULL, &gPendingB, 0, 100);
+    GuiValueBox(RAYGUI_CLITERAL(Rectangle){ 0, 0, 120, 30 }, NULL, &gPendingA, 0, 100);
+}
+
+static void TestValueBoxFocusSwitchKeepsPendingText(void)
+{
+    ResetGui();
+    gPendingA = 10;
+    gPendingB = 20;
+
+    PressRelease(RAYGUI_CLITERAL(Vector2){ 110, 10 }, DrawReverseValueBoxes);
+    CHECK(GuiIsEditing(), "first value box is editing");
+
+    gCharPressed = '7';
+    Begin(RAYGUI_CLITERAL(Vector2){ 110, 10 }, false, false, false);
+    DrawReverseValueBoxes();
+    End();
+    gCharPressed = 0;
+
+    // First click on B only commits A
+    PressRelease(RAYGUI_CLITERAL(Vector2){ 110, 50 }, DrawReverseValueBoxes);
+    CHECK(!GuiIsEditing(), "first click on another value box only commits");
+    CHECK(gPendingA == 100, "focus switch still commits the old value box text");
+
+    // Second click enters B
+    PressRelease(RAYGUI_CLITERAL(Vector2){ 110, 50 }, DrawReverseValueBoxes);
+    CHECK(GuiIsEditing(), "second value box takes focus on the second click");
+
+    gCharPressed = '9';
+    Begin(RAYGUI_CLITERAL(Vector2){ 110, 50 }, false, false, false);
+    DrawReverseValueBoxes();
+    End();
+    gCharPressed = 0;
+
+    gKeyPressed = KEY_ENTER;
+    Begin(RAYGUI_CLITERAL(Vector2){ 110, 50 }, false, false, false);
+    DrawReverseValueBoxes();
+    End();
+    gKeyPressed = 0;
+
+    CHECK(gPendingB == 100, "new value box edits and commits its own text");
+}
+
+static int gChainA = 10;
+static int gChainB = 20;
+static int gChainC = 30;
+
+static void DrawChainedValueBoxes(void)
+{
+    GuiValueBox(RAYGUI_CLITERAL(Rectangle){ 0, 80, 120, 30 }, NULL, &gChainC, 0, 999);
+    GuiValueBox(RAYGUI_CLITERAL(Rectangle){ 0, 40, 120, 30 }, NULL, &gChainB, 0, 999);
+    GuiValueBox(RAYGUI_CLITERAL(Rectangle){ 0, 0, 120, 30 }, NULL, &gChainA, 0, 999);
+}
+
+static void TestValueBoxChainedFocus(void)
+{
+    ResetGui();
+    gChainA = 10;
+    gChainB = 20;
+    gChainC = 30;
+
+    // A: 10 -> "107"
+    PressRelease(RAYGUI_CLITERAL(Vector2){ 110, 10 }, DrawChainedValueBoxes);
+    gCharPressed = '7';
+    Begin(RAYGUI_CLITERAL(Vector2){ 110, 10 }, false, false, false);
+    DrawChainedValueBoxes();
+    End();
+    gCharPressed = 0;
+
+    // B drawn before A: first click commits A
+    PressRelease(RAYGUI_CLITERAL(Vector2){ 110, 50 }, DrawChainedValueBoxes);
+    // Second click starts editing B
+    PressRelease(RAYGUI_CLITERAL(Vector2){ 110, 50 }, DrawChainedValueBoxes);
+    gCharPressed = '9';
+    Begin(RAYGUI_CLITERAL(Vector2){ 110, 50 }, false, false, false);
+    DrawChainedValueBoxes();
+    End();
+    gCharPressed = 0;
+
+    // First click on C commits B; B must preserve its own text
+    PressRelease(RAYGUI_CLITERAL(Vector2){ 110, 90 }, DrawChainedValueBoxes);
+
+    CHECK(gChainA == 107, "first value box commits its own text");
+    CHECK(gChainB == 209, "second value box preserves its text across another focus switch");
+    CHECK(gChainC == 30, "third value box starts with its own value");
+}
+
+static int gOverlapTextResult = RESULT_NONE;
+static void DrawDropdownOverTextBox(void)
+{
+    GuiDropdownBox(RAYGUI_CLITERAL(Rectangle){ 0, 0, 120, 30 }, "A;B;C", &gDropdownActive);
+    gOverlapTextResult = GuiTextBox(RAYGUI_CLITERAL(Rectangle){ 0, 40, 120, 30 }, gTextBoxText, 32);
+}
+
+static void TestDropdownBlocksTextBoxUnderneath(void)
+{
+    ResetGui();
+    gDropdownActive = 0;
+    gOverlapTextResult = RESULT_NONE;
+    strcpy(gTextBoxText, "abc");
+
+    // Open the dropdown
+    PressRelease(RAYGUI_CLITERAL(Vector2){ 10, 10 }, DrawDropdownOverTextBox);
+
+    // Click an item: the TextBox underneath must not steal the edit focus
+    PressRelease(RAYGUI_CLITERAL(Vector2){ 10, 50 }, DrawDropdownOverTextBox);
+
+    CHECK(!GuiIsEditing(), "open dropdown does not start the text box underneath");
+    CHECK(strcmp(gTextBoxText, "abc") == 0, "text box underneath keeps its text");
+    CHECK(gOverlapTextResult == RESULT_NONE, "text box underneath receives no commit");
+}
+
 static void TestDropdownModal(void)
 {
     ResetGui();
@@ -760,7 +878,7 @@ static void TestDropdownModal(void)
 
     // Open on release
     PressRelease(RAYGUI_CLITERAL(Vector2){ 50, 15 }, DrawDropdownOverButton);
-    CHECK((guiCapture.dropdownOpenId != 0), "dropdown opens on release");
+    CHECK((guiCapture.editId != 0), "dropdown opens on release");
     CHECK(gDropdownResult == RESULT_PRESSED, "dropdown open returns RESULT_PRESSED");
 
     // Select the second item
@@ -768,16 +886,16 @@ static void TestDropdownModal(void)
     float itemY = 0.0f + (1 + 1)*(30.0f + spacing) + 15.0f;
     PressRelease(RAYGUI_CLITERAL(Vector2){ 50, itemY }, DrawDropdownOverButton);
     CHECK(gDropdownActive == 1, "dropdown selects the item under the pointer");
-    CHECK((guiCapture.dropdownOpenId == 0), "dropdown closes after selection");
+    CHECK((guiCapture.editId == 0), "dropdown closes after selection");
     CHECK(gDropdownResult == RESULT_CHANGED, "dropdown selection returns RESULT_CHANGED");
     CHECK(gUnderDropdownClicks == 0, "underlying button is not triggered by the dropdown");
 
     // Outside click closes the dropdown without activating the button underneath
     PressRelease(RAYGUI_CLITERAL(Vector2){ 50, 15 }, DrawDropdownOverButton);
-    CHECK((guiCapture.dropdownOpenId != 0), "dropdown reopens");
+    CHECK((guiCapture.editId != 0), "dropdown reopens");
 
     PressRelease(RAYGUI_CLITERAL(Vector2){ 300, 300 }, DrawDropdownOverButton);
-    CHECK((guiCapture.dropdownOpenId == 0), "outside click closes the dropdown");
+    CHECK((guiCapture.editId == 0), "outside click closes the dropdown");
     CHECK(gUnderDropdownClicks == 0, "outside click does not activate the underlying button");
 }
 
@@ -789,17 +907,17 @@ static void TestDropdownLockedModal(void)
 
     // Open normally, then lock the UI: the open popup must freeze as well
     PressRelease(RAYGUI_CLITERAL(Vector2){ 50, 15 }, DrawDropdownOverButton);
-    CHECK((guiCapture.dropdownOpenId != 0), "dropdown is open before locking");
+    CHECK((guiCapture.editId != 0), "dropdown is open before locking");
 
     GuiLock();
     PressRelease(RAYGUI_CLITERAL(Vector2){ 300, 300 }, DrawDropdownOverButton);
-    CHECK((guiCapture.dropdownOpenId != 0), "locked dropdown stays open and ignores clicks");
+    CHECK((guiCapture.editId != 0), "locked dropdown stays open and ignores clicks");
     CHECK(gUnderDropdownClicks == 0, "locked dropdown does not activate the underlying button");
     GuiUnlock();
 
     // After unlocking the normal outside click closes it
     PressRelease(RAYGUI_CLITERAL(Vector2){ 300, 300 }, DrawDropdownOverButton);
-    CHECK((guiCapture.dropdownOpenId == 0), "dropdown closes after unlocking");
+    CHECK((guiCapture.editId == 0), "dropdown closes after unlocking");
     CHECK(gUnderDropdownClicks == 0, "unlocked dropdown does not activate the underlying button");
 }
 
@@ -1032,12 +1150,16 @@ static void TestTextBoxExclusiveInput(void)
     CHECK(strcmp(gTextBoxTextA, "Ax") == 0, "selected text box receives keyboard input");
     CHECK(strcmp(gTextBoxTextB, "B") == 0, "unselected text box does not receive keyboard input");
 
-    // Select the second text box: the first one commits and stops receiving input
+    // First click on the second text box only commits the first one
     gTextBoxResultA = RESULT_NONE;
     PressRelease(RAYGUI_CLITERAL(Vector2){ 10, 50 }, DrawTwoTextBoxes);
 
-    CHECK(GuiIsEditing(), "a single text box remains in edit mode after switching");
+    CHECK(!GuiIsEditing(), "first click on another text box only commits");
     CHECK(gTextBoxResultA == RESULT_PRESSED, "previous editor delivers its commit result");
+
+    // Second click enters the second text box
+    PressRelease(RAYGUI_CLITERAL(Vector2){ 10, 50 }, DrawTwoTextBoxes);
+    CHECK(GuiIsEditing(), "second click starts editing the new text box");
 
     gCharPressed = 'y';
     Begin(RAYGUI_CLITERAL(Vector2){ 300, 300 }, false, false, false);
@@ -1136,10 +1258,14 @@ static void TestSpinnerTakesFocusFromTextBox(void)
     PressRelease(RAYGUI_CLITERAL(Vector2){ 10, 10 }, DrawTextBoxAndSpinner);
     CHECK(GuiIsEditing(), "text box is editing before clicking the spinner");
 
-    // Clicking the spinner middle commits the text box and moves the focus
+    // First click on the spinner only commits the text box
     PressRelease(RAYGUI_CLITERAL(Vector2){ 60, 55 }, DrawTextBoxAndSpinner);
     CHECK(gTextBoxResultA == RESULT_PRESSED, "previous text editor delivers its commit");
-    CHECK(GuiIsEditing(), "spinner takes the edit focus from the text box");
+    CHECK(!GuiIsEditing(), "first click on the spinner only commits the text box");
+
+    // Second click starts editing the spinner
+    PressRelease(RAYGUI_CLITERAL(Vector2){ 60, 55 }, DrawTextBoxAndSpinner);
+    CHECK(GuiIsEditing(), "second click focuses the spinner value box");
 
     // Keyboard input now goes to the spinner, not to the committed text box
     int spinnerValue = gSpinnerValue;
@@ -1197,9 +1323,9 @@ static void TestTwoSpinnersExclusiveInput(void)
     CHECK(gSpinnerValueA != 10, "active spinner receives keyboard input");
     CHECK(gSpinnerValueB == 20, "inactive spinner does not receive keyboard input");
 
-    // Clicking the second spinner commits the first one and moves the focus
+    // The first spinner already committed via ENTER, so clicking the second starts it
     PressRelease(RAYGUI_CLITERAL(Vector2){ 60, 55 }, DrawTwoSpinners);
-    CHECK(GuiIsEditing(), "clicking another spinner keeps a single editor active");
+    CHECK(GuiIsEditing(), "clicking another spinner starts editing when no editor is active");
 
     // The first spinner has been committed and clamped; from now on it must stay unchanged
     int valueA = gSpinnerValueA;
@@ -1275,12 +1401,12 @@ static void DrawCtxRightSlider(void)
 
 static void DrawTwoContexts(GuiContext *left, GuiContext *right, bool slider)
 {
-    GuiPushContext(left, RAYGUI_CLITERAL(Rectangle){ 0, 0, 100, 100 });
+    GuiPushContext(left);
     if (slider) DrawCtxLeftSlider();
     else DrawCtxButtonA();
     GuiPopContext();
 
-    GuiPushContext(right, RAYGUI_CLITERAL(Rectangle){ 100, 0, 200, 100 });
+    GuiPushContext(right);
     DrawCtxRightButton();
     GuiPopContext();
 }
@@ -1378,51 +1504,126 @@ static void TestContextCaptureStaysRouted(void)
     CHECK(gCtxClicksB == 0, "a captured touch is not rerouted to another context");
 }
 
-static void TestContextCaptureNotStolenByEarlierPush(void)
+static void TestContextInputOccupation(void)
 {
     ResetGui();
     GuiContext left = { 0 };
     GuiContext right = { 0 };
     gCtxClicksA = 0;
-    gCtxSliderValue = 0.2f;
+    gCtxClicksB = 0;
 
-    // The right context captures the touch first
-    GuiInput input = { { 150, 15 }, true, false, true, 0 };
+    GuiInput inputs[2] = {
+        { { 20, 20 }, true, false, true, 0, false },
+        { { 140, 20 }, true, false, true, 1, false }
+    };
 
-    GuiBegin(&input, 1);
-    GuiPushContext(&right, RAYGUI_CLITERAL(Rectangle){ 100, 0, 200, 100 });
-    DrawCtxRightSlider();
-    GuiPopContext();
-    GuiEnd();
-
-    // Next frame the touch moves into the left bounds. Left is pushed first, but must not steal it.
-    input.position = RAYGUI_CLITERAL(Vector2){ 50, 15 };
-    input.pressed = false;
-
-    GuiBegin(&input, 1);
-    GuiPushContext(&left, RAYGUI_CLITERAL(Rectangle){ 0, 0, 100, 100 });
+    GuiBegin(inputs, 2);
+    GuiPushContext(&left);
     DrawCtxButtonA();
     GuiPopContext();
+    CHECK(inputs[0].occupied, "held input is occupied when its context pops");
 
-    GuiPushContext(&right, RAYGUI_CLITERAL(Rectangle){ 100, 0, 200, 100 });
-    DrawCtxRightSlider();
+    GuiPushContext(&right);
+    DrawCtxRightButton();
+    GuiPopContext();
+    CHECK(inputs[1].occupied, "next context takes the next free input");
+    GuiEnd();
+
+    inputs[0].pressed = false;
+    inputs[1].pressed = false;
+    GuiBegin(inputs, 2);
+    CHECK(!inputs[0].occupied && !inputs[1].occupied, "GuiBegin resets input occupation");
+
+    GuiPushContext(&left);
+    DrawCtxButtonA();
+    GuiPopContext();
+    GuiPushContext(&right);
+    DrawCtxRightButton();
     GuiPopContext();
     GuiEnd();
 
+    inputs[0].down = false;
+    inputs[0].released = true;
+    inputs[1].down = false;
+    inputs[1].released = true;
+    GuiBegin(inputs, 2);
+
+    GuiPushContext(&left);
+    DrawCtxButtonA();
+    GuiPopContext();
+    GuiPushContext(&right);
+    DrawCtxRightButton();
+    GuiPopContext();
+    GuiEnd();
+
+    CHECK(gCtxClicksA == 1, "left context clicks with its input");
+    CHECK(gCtxClicksB == 1, "right context clicks with its input");
+}
+
+static int gCtxTextResult = RESULT_NONE;
+
+static void DrawCtxTextBox(void)
+{
+    gCtxTextResult = GuiTextBox(RAYGUI_CLITERAL(Rectangle){ 0, 0, 120, 30 }, gTextBoxText, 32);
+}
+
+static void TestContextModalGetsNextTouch(void)
+{
+    ResetGui();
+    GuiContext left = { 0 };
+    GuiContext right = { 0 };
+    gCtxClicksB = 0;
+    gCtxTextResult = RESULT_NONE;
+    strcpy(gTextBoxText, "abc");
+
+    GuiInput input = { { 10, 10 }, true, false, true, 0, false };
+    GuiBegin(&input, 1);
+    GuiPushContext(&left);
+    DrawCtxTextBox();
+    GuiPopContext();
+    GuiEnd();
+
+    input.pressed = false;
     input.down = false;
     input.released = true;
     GuiBegin(&input, 1);
-    GuiPushContext(&left, RAYGUI_CLITERAL(Rectangle){ 0, 0, 100, 100 });
-    DrawCtxButtonA();
+    GuiPushContext(&left);
+    DrawCtxTextBox();
+    GuiPopContext();
+    GuiEnd();
+    CHECK(left.editId != 0, "left text box is editing");
+
+    input.position = RAYGUI_CLITERAL(Vector2){ 140, 20 };
+    input.pressed = true;
+    input.down = true;
+    input.released = false;
+    GuiBegin(&input, 1);
+
+    GuiPushContext(&left);
+    DrawCtxTextBox();
     GuiPopContext();
 
-    GuiPushContext(&right, RAYGUI_CLITERAL(Rectangle){ 100, 0, 200, 100 });
-    DrawCtxRightSlider();
+    GuiPushContext(&right);
+    DrawCtxRightButton();
     GuiPopContext();
     GuiEnd();
 
-    CHECK(gCtxClicksA == 0, "a routed touch is not stolen by an earlier sibling context");
-    CHECK(gCtxSliderValue != 0.2f, "the owning context keeps updating the touch");
+    input.pressed = false;
+    input.down = false;
+    input.released = true;
+    GuiBegin(&input, 1);
+
+    GuiPushContext(&left);
+    DrawCtxTextBox();
+    GuiPopContext();
+
+    GuiPushContext(&right);
+    DrawCtxRightButton();
+    GuiPopContext();
+    GuiEnd();
+
+    CHECK(gCtxTextResult == RESULT_PRESSED, "left context receives the outside press and commits");
+    CHECK(gCtxClicksB == 0, "right context does not receive the touch while left processes it");
 }
 
 static void TestCancelAndReleaseCapture(void)
@@ -1535,14 +1736,14 @@ static void TestContextCancelInsideFrame(void)
     GuiInput input = { { 20, 20 }, true, false, true, 0 };
 
     GuiBegin(&input, 1);
-    GuiPushContext(&ctx, RAYGUI_CLITERAL(Rectangle){ 0, 0, 100, 100 });
+    GuiPushContext(&ctx);
     DrawCtxButtonA();
     GuiPopContext();
 
     GuiCancel(&ctx);
 
     // The same context can be pushed again in the same frame; it must not corrupt the frame list
-    GuiPushContext(&ctx, RAYGUI_CLITERAL(Rectangle){ 0, 0, 100, 100 });
+    GuiPushContext(&ctx);
     DrawCtxButtonA();
     GuiPopContext();
     GuiEnd();
@@ -1559,20 +1760,20 @@ static void TestContextMissingRelease(void)
     GuiInput input = { { 20, 15 }, true, false, true, 0 };
 
     GuiBegin(&input, 1);
-    GuiPushContext(&ctx, RAYGUI_CLITERAL(Rectangle){ 0, 0, 100, 100 });
+    GuiPushContext(&ctx);
     DrawCtxLeftSlider();
     GuiPopContext();
     GuiEnd();
 
     // No input at all: the routed touch is treated as released instead of sticking forever
     GuiBegin(NULL, 0);
-    GuiPushContext(&ctx, RAYGUI_CLITERAL(Rectangle){ 0, 0, 100, 100 });
+    GuiPushContext(&ctx);
     DrawCtxLeftSlider();
     GuiPopContext();
     GuiEnd();
 
     GuiBegin(NULL, 0);
-    GuiPushContext(&ctx, RAYGUI_CLITERAL(Rectangle){ 0, 0, 100, 100 });
+    GuiPushContext(&ctx);
     DrawCtxLeftSlider();
     CHECK(GuiGetCapturedId() == 0, "missing touch release clears the context capture");
     GuiPopContext();
@@ -1600,6 +1801,9 @@ int main(void)
     TestValueBoxParseOnCommit();
     TestValueBoxFloat();
     TestValueBoxLimits();
+    TestValueBoxFocusSwitchKeepsPendingText();
+    TestValueBoxChainedFocus();
+    TestDropdownBlocksTextBoxUnderneath();
     TestSpinnerValueBox();
     TestSpinnerArrowWhileEditing();
     TestSpinnerTakesFocusFromTextBox();
@@ -1616,7 +1820,8 @@ int main(void)
     TestExplicitInputClick();
     TestMultiContextIndependentTouches();
     TestContextCaptureStaysRouted();
-    TestContextCaptureNotStolenByEarlierPush();
+    TestContextInputOccupation();
+    TestContextModalGetsNextTouch();
     TestCancelAndReleaseCapture();
     TestDragThresholdConfig();
     TestDefaultContextIgnoresExtraInputs();

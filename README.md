@@ -112,27 +112,29 @@ GuiBegin(inputs, 2);
 GuiEnd();
 ```
 
-Independent UI regions (for example a left joystick and right buttons) use sibling contexts, each routed to its own touch. Start with `GuiBegin(inputs, count)`, then push/pop in order:
+Independent UI regions (for example a left joystick and right buttons) use sibling contexts. Each context takes the first input whose `occupied` flag is false. Start with `GuiBegin(inputs, count)`, then push/pop in order:
 
 ```c
-GuiPushContext(&leftContext, leftBounds);
-DrawLeftUI();          // only touches inside leftBounds reach this context
+GuiPushContext(&leftContext);
+DrawLeftUI();
 GuiPopContext();
 
-GuiPushContext(&rightContext, rightBounds);
+GuiPushContext(&rightContext);
 DrawRightUI();
 GuiPopContext();
 ```
 
-Contexts are flat (no nesting) and keep their capture across frames. `GuiCancel(&ctx)` silently clears all interaction state (window focus loss, context removal); `GuiReleaseCapture(&ctx)` drops only the capture. `GuiSetDragThreshold(px)` / `GuiGetDragThreshold()` configure the drag threshold at runtime.
+`GuiBegin()` clears the `occupied` flags; `GuiPopContext()` marks the bound input occupied while it is held, and releases it on the input's release frame. The `inputs[]` array belongs to the caller and must stay valid until `GuiEnd()`.
+
+Contexts are flat (no nesting) and keep their `inputIndex` across frames. `GuiCancel(&ctx)` silently clears all interaction state (window focus loss, context removal); `GuiReleaseCapture(&ctx)` drops only the capture. `GuiSetDragThreshold(px)` / `GuiGetDragThreshold()` configure the drag threshold at runtime.
 
 Rules:
 
 - The press frame is capture-only: no control runs interaction side effects. The topmost hit control becomes the tentative owner.
 - Click-like results are returned on release. Dragging starts after the 5 px drag threshold; direction arbitration then transfers the capture to the first hit control supporting that direction (for example a Slider under a floating Button). If no control supports the direction, the topmost press owner keeps the capture, so a Button still triggers after a small drag.
 - The capture owner keeps the interaction while the pointer leaves its bounds, but the release position matters: a discrete control (Button, Toggle, CheckBox, ComboBox, ...) released outside its bounds is cancelled, while a continuous drag (Slider, ScrollBar, ColorPanel) may finish outside and keeps updating.
-- The default context uses only the first input of the frame; extra touches are ignored. With `GuiPushContext()`, each context receives one unclaimed touch inside its bounds, and keeps that touch routed until release even if it moves outside the bounds.
-- A touch already routed/captured by one context is never delivered to a sibling context. Contexts are isolation units, not concurrency units: use one context per independent touch area.
+- The default context uses only the first input of the frame; extra touches are ignored. With `GuiPushContext()`, each context takes the first input that is not occupied (preferring a pressed/held input over an idle one) and keeps it while held.
+- One input is assigned to one context at a time. Contexts are isolation units, not concurrency units: use one context per independent touch area.
 - Layered UI uses one frame for the whole stack: draw layers from bottom to top, never start/end a frame per layer. Later controls win the hit stack; modal editors block layers below. `GuiPushContext()` is for disjoint touch regions, not z-ordering. To block a background layer while a popup is open, call `GuiLock()` before drawing it and `GuiUnlock()` before drawing the popup.
 - `GuiBeginFrame()`/`GuiEndFrame()` are the macro-driven convenience pair used by standalone backends; `GuiBegin()`/`GuiEnd()` take explicit `GuiInput` snapshots. All three frame pairs are paired and cannot be mixed within a frame.
 - Without capture only the topmost hit control is highlighted; with capture only the capture holder is. Hover ownership does not drift with the pointer.
@@ -142,7 +144,7 @@ Rules:
 - `GuiGetCapturedId()` returns the active control id (`0` when idle). Ids are internal and are not exposed to the application.
 - Control ids are assigned automatically in draw order. Draw dynamic lists whose item count can change **after** all fixed controls: otherwise the ids of the controls drawn after the list shift and an in-progress Slider/ScrollPanel drag can lose its capture.
 - `GuiScrollPanel()` scrolls with the wheel, with a scrollbar drag, or by dragging its content area. Content drag uses the context-level drag delta, so no extra per-panel pointer state is needed.
-- TextBox, ValueBox, ValueBoxFloat, Spinner and DropdownBox manage their edit/open state internally. Within a context only one text control can be edited at a time: clicking another one commits the previous editor and switches focus, and keyboard input only reaches the active control. Use `GuiIsEditing()` to check whether the current context has a text control being edited. Keyboard input is global, so do not edit text in two contexts simultaneously.
+- TextBox, ValueBox, ValueBoxFloat, Spinner and DropdownBox manage their edit/open state internally. Within a context there is one active modal control: the first click on another text control only commits the previous editor; a second click enters the new one. Keyboard input only reaches the active editor. `GuiIsEditing()` reports whether the current context has an active editor or an open dropdown. Keyboard input is global, so do not edit text in two contexts simultaneously.
 - ValueBox and ValueBoxFloat are built on the internal GuiTextBox: both keep their text in an internal buffer while editing and parse only on commit (ENTER, ESCAPE or click outside). `GuiValueBoxFloat(bounds, text, float *value, float minValue, float maxValue)` no longer takes a caller text buffer. For both controls `maxValue <= minValue` disables the range limit; otherwise committed/external values are clamped. Invalid text keeps the previous value. This also gives them normal TextBox editing (cursor, selection, clipboard).
 - `GuiSpinner()` is a layout helper built from two Buttons and a ValueBox; the three children own their capture ids independently. While the value box is editing, an arrow click first commits the editor (modal), and the next click steps the value.
 
