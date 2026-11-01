@@ -883,6 +883,75 @@ static void TestScrollPanelWheel(void)
     CHECK(gScroll.y == 0.0f, "locked scroll panel does not scroll with the wheel");
 }
 
+static void TestScrollPanelContentDrag(void)
+{
+    ResetGui();
+    gScroll = RAYGUI_CLITERAL(Vector2){ 0, 0 };
+    gScrollResult = RESULT_NONE;
+
+    // Press on empty content (not on a scrollbar)
+    Begin(RAYGUI_CLITERAL(Vector2){ 50, 100 }, true, true, false);
+    DrawScrollPanel();
+    End();
+
+    // Drag content up-left: this scrolls down-right
+    Begin(RAYGUI_CLITERAL(Vector2){ 30, 70 }, true, false, false);
+    DrawScrollPanel();
+    End();
+
+    CHECK(gScroll.x < 0.0f, "dragging content pans the scroll panel horizontally");
+    CHECK(gScroll.y < 0.0f, "dragging content pans the scroll panel vertically");
+    CHECK(gScrollResult == RESULT_CHANGED, "content drag reports RESULT_CHANGED");
+
+    Begin(RAYGUI_CLITERAL(Vector2){ 30, 70 }, false, false, true);
+    DrawScrollPanel();
+    End();
+
+    CHECK(gScroll.x < 0.0f, "scroll value is kept after releasing a content drag");
+
+    // Locked panel must not pan either
+    gScroll = RAYGUI_CLITERAL(Vector2){ 0, 0 };
+    GuiLock();
+    Begin(RAYGUI_CLITERAL(Vector2){ 50, 100 }, true, true, false);
+    DrawScrollPanel();
+    End();
+    Begin(RAYGUI_CLITERAL(Vector2){ 30, 70 }, true, false, false);
+    DrawScrollPanel();
+    End();
+    Begin(RAYGUI_CLITERAL(Vector2){ 30, 70 }, false, false, true);
+    DrawScrollPanel();
+    End();
+    GuiUnlock();
+
+    CHECK((gScroll.x == 0.0f) && (gScroll.y == 0.0f), "locked scroll panel does not pan by content drag");
+}
+
+static void TestScrollPanelSlowContentDrag(void)
+{
+    ResetGui();
+    gScroll = RAYGUI_CLITERAL(Vector2){ 0, 0 };
+
+    Begin(RAYGUI_CLITERAL(Vector2){ 50, 100 }, true, true, false);
+    DrawScrollPanel();
+    End();
+
+    // Below the 5 px threshold: no pan yet
+    Begin(RAYGUI_CLITERAL(Vector2){ 47, 97 }, true, false, false);
+    DrawScrollPanel();
+    End();
+    CHECK((gScroll.x == 0.0f) && (gScroll.y == 0.0f), "content drag does not pan before the threshold");
+
+    // Crossing the threshold must include the pre-threshold movement (total -7,-7)
+    Begin(RAYGUI_CLITERAL(Vector2){ 43, 93 }, true, false, false);
+    DrawScrollPanel();
+    End();
+    CHECK((gScroll.x == -7.0f) && (gScroll.y == -7.0f), "first active drag applies the whole gesture delta");
+
+    Begin(RAYGUI_CLITERAL(Vector2){ 43, 93 }, false, false, true);
+    DrawScrollPanel();
+    End();
+}
+
 static void TestGridDoesNotTrigger(void)
 {
     ResetGui();
@@ -1540,6 +1609,8 @@ int main(void)
     TestLockBlocksContinuousAndTextControls();
     TestComboBoxSelector();
     TestScrollPanelWheel();
+    TestScrollPanelContentDrag();
+    TestScrollPanelSlowContentDrag();
     TestGridDoesNotTrigger();
     TestOneDiscreteTriggerPerFrame();
     TestExplicitInputClick();

@@ -916,6 +916,10 @@ typedef struct GuiContext {
     // Pointer / capture state
     Vector2 pointerPosition;
     Vector2 startPos;
+    Vector2 lastPointerPosition;    // Previous frame position (internal)
+    Vector2 dragDelta;              // Pointer movement this frame (0 without history)
+    bool dragActive;                // Confirmed capture + held + threshold crossed
+    bool hasPointerHistory;         // lastPointerPosition is valid for this frame
     bool inputDown;
     bool inputPressed;
     bool inputReleased;
@@ -1076,7 +1080,7 @@ RAYGUIAPI int GuiWindowBox(Rectangle bounds, const char *title);                
 RAYGUIAPI int GuiGroupBox(Rectangle bounds, const char *text);                                         // Group Box control with text name
 RAYGUIAPI int GuiLine(Rectangle bounds, const char *text);                                             // Line separator control, could contain text
 RAYGUIAPI int GuiPanel(Rectangle bounds, const char *text);                                            // Panel control, useful to group controls
-RAYGUIAPI int GuiScrollPanel(Rectangle bounds, const char *text, Rectangle content, Vector2 *scroll, Rectangle *view); // Scroll Panel control
+RAYGUIAPI int GuiScrollPanel(Rectangle bounds, const char *text, Rectangle content, Vector2 *scroll, Rectangle *view); // Scroll Panel; wheel, scrollbar drag or content drag
 
 // Basic controls set
 RAYGUIAPI int GuiLabel(Rectangle bounds, const char *text);                                            // Label control
@@ -2202,6 +2206,9 @@ static void GuiResetContextState(GuiContext *ctx)
     ctx->isConfirmed = false;
     ctx->didDrag = false;
     ctx->dragDirection = GUI_DRAG_NONE;
+    ctx->dragActive = false;
+    ctx->dragDelta = RAYGUI_CLITERAL(Vector2){ 0.0f, 0.0f };
+    ctx->hasPointerHistory = false;
     ctx->pressFrame = false;
     ctx->releaseFrame = false;
     ctx->frameTriggered = false;
@@ -2364,6 +2371,9 @@ static void GuiSelectDefaultInput(GuiContext *ctx)
 // Rebuild a context for the current frame and run the press/release/arbitration state machine
 static void GuiPrepareContext(GuiContext *ctx)
 {
+    unsigned int previousFrame = ctx->frameCounter;
+    bool wasDragActive = ctx->dragActive;
+
     ctx->inFrame = true;
     ctx->framePrepared = true;
     ctx->frameCounter = guiFrameCounter;
@@ -2375,6 +2385,7 @@ static void GuiPrepareContext(GuiContext *ctx)
     ctx->triggeredId = 0;
     ctx->pressFrame = false;
     ctx->releaseFrame = false;
+    ctx->dragActive = false;
 
     // No editor and no pending commit: ValueBox text buffers are rebuilt from values
     if ((ctx->editId == 0) && (ctx->commitId == 0)) ctx->valueBoxBufferCount = 0;
@@ -2383,6 +2394,21 @@ static void GuiPrepareContext(GuiContext *ctx)
     ctx->inputPressed = ctx->activeInput.pressed;
     ctx->inputReleased = ctx->activeInput.released;
     ctx->inputDown = ctx->activeInput.down;
+
+    // Drag delta is input-layer state: controls only read it instead of tracking history.
+    // A context that was not prepared on the previous frame starts a fresh history.
+    bool continuous = (previousFrame != 0) && ((previousFrame + 1) == guiFrameCounter);
+    if (!continuous) ctx->hasPointerHistory = false;
+
+    ctx->dragDelta = RAYGUI_CLITERAL(Vector2){ 0.0f, 0.0f };
+    if (ctx->hasPointerHistory)
+    {
+        ctx->dragDelta.x = ctx->pointerPosition.x - ctx->lastPointerPosition.x;
+        ctx->dragDelta.y = ctx->pointerPosition.y - ctx->lastPointerPosition.y;
+    }
+
+    ctx->lastPointerPosition = ctx->pointerPosition;
+    ctx->hasPointerHistory = true;
 
     ctx->hoverId = (ctx->capturedId != 0)? ctx->capturedId : ctx->hoverIdNext;
 
@@ -2454,6 +2480,17 @@ static void GuiPrepareContext(GuiContext *ctx)
         ctx->dragDirection = GUI_DRAG_NONE;
         ctx->pressHitStackCount = 0;
         ctx->commitId = 0;
+    }
+
+    // A drag is active only after arbitration confirmed an owner and the pointer is still held
+    ctx->dragActive = ctx->isConfirmed && ctx->inputDown && ctx->didDrag;
+
+    // On the first active frame include the movement spent before the threshold, so the
+    // content follows the whole gesture instead of losing the first few pixels.
+    if (ctx->dragActive && !wasDragActive)
+    {
+        ctx->dragDelta.x = ctx->pointerPosition.x - ctx->startPos.x;
+        ctx->dragDelta.y = ctx->pointerPosition.y - ctx->startPos.y;
     }
 }
 
@@ -2779,6 +2816,8 @@ void GuiReleaseCapture(GuiContext *ctx)
     ctx->tentativeId = 0;
     ctx->isConfirmed = false;
     ctx->didDrag = false;
+    ctx->dragActive = false;
+    ctx->dragDelta = RAYGUI_CLITERAL(Vector2){ 0.0f, 0.0f };
     ctx->dragDirection = GUI_DRAG_NONE;
     ctx->pressHitStackCount = 0;
     ctx->commitId = 0;
@@ -2964,6 +3003,9 @@ int GuiPanel(Rectangle bounds, const char *text)
 }
 
 // Scroll Panel control
+// NOTE: Scrolling sources are the wheel, the scrollbars, and dragging the panel content.
+// Content drag uses the context-level dragDelta/dragActive state, so no per-panel pointer
+// history is stored; scrollbar drags keep their own capture.
 int GuiScrollPanel(Rectangle bounds, const char *text, Rectangle content, Vector2 *scroll, Rectangle *view)
 {
     #define RAYGUI_MIN_SCROLLBAR_WIDTH     40
@@ -3073,6 +3115,15 @@ int GuiScrollPanel(Rectangle bounds, const char *text, Rectangle content, Vector
             // Horizontal and vertical scrolling with mouse wheel
             if (hasHorizontalScrollBar && (GUI_KEY_DOWN(KEY_LEFT_CONTROL) || GUI_KEY_DOWN(KEY_LEFT_SHIFT))) scrollPos.x += scrollDelta*scrollSpeed.x;
             else scrollPos.y += scrollDelta*scrollSpeed.y; // Vertical scroll
+        }
+
+        // Drag panning: when this panel owns a confirmed drag (started on empty content or
+        // a child control), move the scroll by the input-layer delta. Scrollbar drags keep
+        // their own capture and never reach this branch.
+        if (!guiLocked && guiCapture.dragActive && (guiCapture.capturedId == panelId))
+        {
+            scrollPos.x += guiCapture.dragDelta.x;
+            scrollPos.y += guiCapture.dragDelta.y;
         }
     }
 

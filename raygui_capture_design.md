@@ -49,7 +49,7 @@
 |------|------|
 | **Button / Toggle / Dropdown** | press 暂定，release 时指针仍在控件范围内才触发；拖出范围后松开视为 Cancel；Dropdown 展开态吃掉外部点击 |
 | **TextBox** | press 帧聚焦；输入直接写 buffer；失焦 / 回车 / ESC 均 = 提交。**提交标记在 press 帧产生**（检测到外部点击 / 回车 / ESC），**`if` 返回值在 release 帧交付**。编辑态吃掉外部点击；GUI 不管理原值，回滚交给业务层。编辑焦点由 GUI 内部 `editId` 管理，业务层不传 `editMode` 变量 |
-| **ScrollPanel / Slider** | 连续值控件，`if` 通过 = 值变了（拖拽中**值变化时**每帧返回）；**值未变化时 release 帧不再额外返回**；拖动允许在范围外结束，快速点击要求 release 在范围内；虚拟化由业务层算可见范围 + 循环绘制 |
+| **ScrollPanel / Slider** | 连续值控件，`if` 通过 = 值变了（拖拽中**值变化时**每帧返回）；**值未变化时 release 帧不再额外返回**；拖动允许在范围外结束，快速点击要求 release 在范围内；ScrollPanel 支持滚轮、ScrollBar 拖动、内容区拖动；虚拟化由业务层算可见范围 + 循环绘制 |
 | **Hover 绘制** | 有 capture → 仅 capture 持有者高亮；无 capture → 仅最顶层命中控件（hitStack 栈顶）高亮。hover 权不随鼠标实时漂移 |
 | **模态拦截** | TextBox 编辑中、Dropdown 展开中，点击外部仅自身结束，不穿透触发底层控件 |
 
@@ -319,6 +319,8 @@ float GuiGetDragThreshold(void);              // 查询当前 threshold
 **怎么改**：
 - 仅在值相对上一帧发生变化时返回 true。
 - release 帧若值未变化则不额外返回，避免与拖拽中重复。
+- ScrollPanel 的三种滚动源：滚轮、ScrollBar 拖动、内容区拖动。内容区拖动读取
+  `GuiContext.dragActive` / `dragDelta`，不保存每面板的上一帧指针。
 
 **影响范围**：`GuiSlider*`、`GuiScrollPanel`。
 

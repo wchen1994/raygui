@@ -169,6 +169,7 @@ capture 可能丢失。等手势结束后再调整 z-order。
 | `commitId` | 外部点击产生的待提交标记，在抬起帧交付 |
 | `inputs` / `activeInput` | 本 context 可见输入与当前驱动输入 |
 | `hasTouch` / `touchId` / `bounds` | 多 context 路由状态与作用域范围 |
+| `dragDelta` / `dragActive` | 输入层统一计算的帧位移与“已确认拖动中”状态 |
 
 帧边界行为：
 
@@ -193,7 +194,8 @@ release 帧的返回规则：
 ## 4. 方向仲裁
 
 - Slider/SliderBar、ColorBarAlpha/Hue：水平；ScrollBar：按长宽推断水平/垂直；
-  ScrollPanel、ColorPanel：双向。
+  ScrollPanel、ColorPanel：双向。ScrollPanel 在空白内容区拖动时会平移 `scroll`；
+  按在 ScrollBar 上仍由 ScrollBar 自己捕获。
 - Button、TextBox、Dropdown 等不声明方向，拖拽时由父容器接管；若没有任何命中控件支持
   该方向，则保留 press 帧的暂定归属（普通按钮拖动后松开仍会触发）。
 - 移出 bounds 不自动释放 capture；离散控件在范围外 release 视为 Cancel，连续拖动可在范围外结束。
@@ -203,7 +205,8 @@ release 帧的返回规则：
 - 离散控件（Button/Toggle/CheckBox/ComboBox/ListView/TabBar/StatusBar/DummyRec 等）：
   release 帧返回，`RESULT_PRESSED` / `RESULT_CHANGED` / 自定义结果走一帧一次闸门。
 - Slider/ScrollBar/ScrollPanel/ColorPanel/ColorBar：只在值变化时返回 `RESULT_CHANGED`，
-  release 帧值未变不重复返回；快速点击在 release 应用值。
+  release 帧值未变不重复返回；快速点击在 release 应用值。ScrollPanel 支持滚轮、ScrollBar
+  拖动和内容区拖动三种滚动方式，内容拖动读取 context 的 `dragDelta`。
 - TextBox/ValueBox/ValueBoxFloat/Spinner/DropdownBox：编辑/展开状态完全由 GUI 内部管理，
   `editId` 是唯一事实来源，业务层不再传 `bool`。
   - 命中进入编辑，不返回值。
@@ -265,7 +268,7 @@ GuiEndFromRaylib();
 - Dropdown 展开/选中/外部关闭；`GuiLock()` 时冻结，解锁后正常关闭；
 - `GuiLock()` 阻断 Slider 拖动、文本编辑、Dropdown 交互和 ScrollPanel 滚轮；
 - ComboBox selector 仍可翻页；
-- ScrollPanel 滚轮与返回值；
+- ScrollPanel 滚轮、ScrollBar 拖动、内容区拖动与返回值；
 - `GuiGrid` 不产生离散触发；
 - 一个 context 每帧最多一个离散控件触发；多个平级 context 可同帧各自触发。
 - `GuiBegin(GuiInput*, int)` 显式输入点击；
