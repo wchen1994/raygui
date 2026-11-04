@@ -637,6 +637,8 @@ typedef enum {
     RESULT_PRESSED     = 1,
     RESULT_CHANGED     = 2,
 
+    RESULT_EDIT_TAP    = 3,    // GuiTextBox()/GuiValueBox*()/GuiSpinner(): editing started on a confirmed tap (pointer released without drag)
+
     RESULT_TAB_CLOSE   = 4     // GuiTabBar(), tab close request
 } GuiResult;
 
@@ -3630,10 +3632,11 @@ int GuiDropdownBox(Rectangle bounds, const char *text, int *active)
 }
 
 // Text Box control
-// NOTE: Returns RESULT_PRESSED on commit (ENTER, ESCAPE or click outside); edit state and
-// cursor are internal (editId), so no caller-side editMode is needed. textSize includes
-// the string terminator. styleControl lets ValueBox reuse this implementation with
-// VALUEBOX styling; readOnly disables editing for that invocation.
+// NOTE: Returns RESULT_PRESSED on commit (ENTER, ESCAPE or click outside) and RESULT_EDIT_TAP
+// on the frame editing starts (confirmed tap); edit state and cursor are internal (editId),
+// so no caller-side editMode is needed. textSize includes the string terminator.
+// styleControl lets ValueBox reuse this implementation with VALUEBOX styling; readOnly
+// disables editing for that invocation.
 static int GuiTextBoxStyled(Rectangle bounds, char *text, int textSize, int styleControl, bool readOnly)
 {
     #if !defined(RAYGUI_TEXTBOX_AUTO_CURSOR_COOLDOWN)
@@ -3699,16 +3702,29 @@ static int GuiTextBoxStyled(Rectangle bounds, char *text, int textSize, int styl
         result = GuiDiscreteResult(RESULT_PRESSED);
     }
 
-    // Press inside a non-editing text box starts editing and places the cursor at the end
-    if (!editing && (guiCapture.editId == 0) && !guiCapture.suppressEditStart && hit && GuiIsPointerPressed() && !readOnly)
+    // Tap inside a non-editing text box starts editing and places the cursor at the end
+    // NOTE: Editing begins on pointer release (a confirmed tap) instead of the press frame,
+    // so touch hosts can show the native on-screen keyboard only after a real tap.
+    // A tap is the release of a press that started on this control without crossing the
+    // drag threshold; RESULT_EDIT_TAP is returned on the frame editing starts
+    if (!editing && (guiCapture.editId == 0) && !guiCapture.suppressEditStart && !readOnly)
     {
-        GuiBeginTextEdit(textLength);
-        textBoxCursorIndex = textLength;
-        autoCursorCounter = 0;
-        editing = true;
+        // Same-frame tap fallback: press and release delivered in a single frame
+        bool sameFrameTap = hit && GuiIsPointerPressed() && GuiIsPointerReleased();
 
-        // editText only belongs to ValueBox; a normal TextBox uses the caller buffer
-        if (styleControl != VALUEBOX) guiCapture.editTextIsValueBox = false;
+        if (GuiIsPointerReleased() && !guiCapture.didDrag &&
+            (sameFrameTap || (guiCapture.capturedId == guiCapture.currentId)))
+        {
+            GuiBeginTextEdit(textLength);
+            textBoxCursorIndex = textLength;
+            autoCursorCounter = 0;
+            editing = true;
+
+            // editText only belongs to ValueBox; a normal TextBox uses the caller buffer
+            if (styleControl != VALUEBOX) guiCapture.editTextIsValueBox = false;
+
+            result = GuiDiscreteResult(RESULT_EDIT_TAP);
+        }
     }
 
     if ((state != STATE_DISABLED) &&                // Control not disabled
