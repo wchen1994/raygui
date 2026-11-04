@@ -3696,18 +3696,23 @@ static int GuiTextBoxStyled(Rectangle bounds, char *text, int textSize, int styl
     {
 
     // Commit marker set on an outside press is delivered on the release frame
+    bool commitDelivered = false;
     if ((guiCapture.commitId == guiCapture.currentId) && GuiIsPointerReleased())
     {
         guiCapture.commitId = 0;
         result = GuiDiscreteResult(RESULT_PRESSED);
+        commitDelivered = true;
     }
 
     // Tap inside a non-editing text box starts editing and places the cursor at the end
     // NOTE: Editing begins on pointer release (a confirmed tap) instead of the press frame,
     // so touch hosts can show the native on-screen keyboard only after a real tap.
     // A tap is the release of a press that started on this control without crossing the
-    // drag threshold; RESULT_EDIT_TAP is returned on the frame editing starts
-    if (!editing && (guiCapture.editId == 0) && !guiCapture.suppressEditStart && !readOnly)
+    // drag threshold; RESULT_EDIT_TAP is returned on the frame editing starts.
+    // A commit delivered this frame must not restart editing: on the release after an
+    // outside press, capturedId points back at this control (tentativeId was editId)
+    if (!commitDelivered && !editing && (guiCapture.editId == 0) &&
+        !guiCapture.suppressEditStart && !readOnly)
     {
         // Same-frame tap fallback: press and release delivered in a single frame
         bool sameFrameTap = hit && GuiIsPointerPressed() && GuiIsPointerReleased();
