@@ -5185,7 +5185,8 @@ int GuiColorBarHue(Rectangle bounds, const char *text, float *hue)
 //      Color GuiColorPanel(Rectangle bounds, Color color)
 //      float GuiColorBarAlpha(Rectangle bounds, float alpha)
 //      float GuiColorBarHue(Rectangle bounds, float value)
-// NOTE: bounds define GuiColorPanel() size
+// NOTE: bounds define the whole picker size; the hue bar is drawn INSIDE bounds, on the right,
+// so the panel passed to GuiColorPanel() is shrunk by HUEBAR_PADDING + HUEBAR_WIDTH on the right
 // NOTE: this picker converts RGB to HSV, which can cause the Hue control to jump. If you have this problem, consider using the HSV variant instead
 int GuiColorPicker(Rectangle bounds, const char *text, Color *color)
 {
@@ -5194,9 +5195,10 @@ int GuiColorPicker(Rectangle bounds, const char *text, Color *color)
     Color temp = { 200, 0, 0, 255 };
     if (color == NULL) color = &temp;
 
-    result = GuiColorPanel(bounds, NULL, color);
+    Rectangle boundsPanel = { (float)bounds.x, (float)bounds.y, (float)(bounds.width - GuiGetStyle(COLORPICKER, HUEBAR_PADDING) - GuiGetStyle(COLORPICKER, HUEBAR_WIDTH)), (float)bounds.height };
+    result = GuiColorPanel(boundsPanel, NULL, color);
 
-    Rectangle boundsHue = { (float)bounds.x + bounds.width + GuiGetStyle(COLORPICKER, HUEBAR_PADDING), (float)bounds.y, (float)GuiGetStyle(COLORPICKER, HUEBAR_WIDTH), (float)bounds.height };
+    Rectangle boundsHue = { (float)bounds.x + boundsPanel.width + GuiGetStyle(COLORPICKER, HUEBAR_PADDING), (float)bounds.y, (float)GuiGetStyle(COLORPICKER, HUEBAR_WIDTH), (float)bounds.height };
     //Rectangle boundsAlpha = { bounds.x, bounds.y + bounds.height + GuiGetStyle(COLORPICKER, BARS_PADDING), bounds.width, GuiGetStyle(COLORPICKER, BARS_THICK) };
 
     // NOTE: this conversion can cause low hue-resolution, if the r, g and b value are very similar, which causes the hue bar to shift around when only the GuiColorPanel is used
@@ -5218,7 +5220,8 @@ int GuiColorPicker(Rectangle bounds, const char *text, Color *color)
 //      int GuiColorPanelHSV(Rectangle bounds, const char *text, Vector3 *colorHsv)
 //      int GuiColorBarAlpha(Rectangle bounds, const char *text, float *alpha)
 //      float GuiColorBarHue(Rectangle bounds, float value)
-// NOTE: bounds define GuiColorPanelHSV() size
+// NOTE: bounds define the whole picker size; the hue bar is drawn INSIDE bounds, on the right,
+// so the panel passed to GuiColorPanelHSV() is shrunk by HUEBAR_PADDING + HUEBAR_WIDTH on the right
 int GuiColorPickerHSV(Rectangle bounds, const char *text, Vector3 *colorHsv)
 {
     int result = RESULT_NONE;
@@ -5232,9 +5235,10 @@ int GuiColorPickerHSV(Rectangle bounds, const char *text, Vector3 *colorHsv)
         colorHsv = &tempHsv;
     }
 
-    result = GuiColorPanelHSV(bounds, NULL, colorHsv);
+    Rectangle boundsPanel = { (float)bounds.x, (float)bounds.y, (float)(bounds.width - GuiGetStyle(COLORPICKER, HUEBAR_PADDING) - GuiGetStyle(COLORPICKER, HUEBAR_WIDTH)), (float)bounds.height };
+    result = GuiColorPanelHSV(boundsPanel, NULL, colorHsv);
 
-    Rectangle boundsHue = { (float)bounds.x + bounds.width + GuiGetStyle(COLORPICKER, HUEBAR_PADDING), (float)bounds.y, (float)GuiGetStyle(COLORPICKER, HUEBAR_WIDTH), (float)bounds.height };
+    Rectangle boundsHue = { (float)bounds.x + boundsPanel.width + GuiGetStyle(COLORPICKER, HUEBAR_PADDING), (float)bounds.y, (float)GuiGetStyle(COLORPICKER, HUEBAR_WIDTH), (float)bounds.height };
 
     if (result == RESULT_NONE) result = GuiColorBarHue(boundsHue, NULL, &colorHsv->x);
 
