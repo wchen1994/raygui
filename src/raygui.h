@@ -886,6 +886,11 @@ typedef struct GuiHitEntry {
     #define RAYGUI_VALUEBOX_MAX_CHARS    32      // ValueBox edit buffer size (including terminator)
 #endif
 
+// Content-bounds sink: called once per control with the bounds handed to it (before the
+// control rewrites them internally). The layout engine uses it to measure a group of
+// controls without asking the caller to report each rectangle by hand.
+typedef void (*GuiFitSinkFn)(void *sink, Rectangle bounds);
+
 // Isolated interaction context. Zero-initialize before first use and keep it alive while
 // used; do not copy/move it after GuiPushContext() because internal pointers target it.
 // Single-context UIs do not need a GuiContext (the library owns a default one).
@@ -949,6 +954,12 @@ typedef struct GuiContext {
     // Internal frame bookkeeping
     struct GuiContext *nextFrameContext;
     bool inFrame;
+
+    // Layout measurement sink (host-owned, optional). While fitReport != NULL every control
+    // reports the bounds it was given, so a layout pass can measure a group of controls.
+    // Unbound by default: the cost is one NULL check per control.
+    void *fitSink;
+    GuiFitSinkFn fitReport;
 } GuiContext;
 
 //----------------------------------------------------------------------------------
@@ -1028,6 +1039,11 @@ RAYGUIAPI void GuiCancel(GuiContext *ctx);                      // ctx==NULL: cu
 RAYGUIAPI void GuiReleaseCapture(GuiContext *ctx);              // ctx==NULL: current; drop capture only
 RAYGUIAPI void GuiSetDragThreshold(float threshold);            // Set global drag threshold in pixels (default 5)
 RAYGUIAPI float GuiGetDragThreshold(void);                      // Get global drag threshold in pixels
+
+// Layout measurement: bind a sink to the current context and every control drawn afterwards
+// reports the bounds it was given (before any internal adjustment). Pass NULL to detach.
+// The bound layout context is opaque to raygui; the sink is the only thing that reads it.
+RAYGUIAPI void GuiSetFitSink(void *sink, GuiFitSinkFn fn);
 
 // Queries for the current context
 RAYGUIAPI unsigned int GuiGetCapturedId(void);                  // press: tentative, confirmed: captured, idle: 0
@@ -1980,6 +1996,14 @@ int GuiGetStyle(int control, int property)
 //----------------------------------------------------------------------------------
 static GuiInput *GuiContextInput(GuiContext *ctx);
 
+// Report the bounds handed to a control to the bound layout sink (no-op when unbound).
+// Must be the FIRST statement of a control: controls rewrite `bounds` internally, so a
+// later call would report the control's inner box instead of the area it was given.
+static void GuiFitReport(Rectangle bounds)
+{
+    if (guiCapture.fitReport != NULL) guiCapture.fitReport(guiCapture.fitSink, bounds);
+}
+
 static Vector2 GuiPointerPosition(void) { return GuiContextInput(guiCurrentContext)->position; }
 static bool GuiIsPointerDown(void) { return GuiContextInput(guiCurrentContext)->down; }
 static bool GuiIsPointerPressed(void) { return GuiContextInput(guiCurrentContext)->pressed; }
@@ -2701,6 +2725,13 @@ float GuiGetDragThreshold(void)
     return guiDragThreshold;
 }
 
+// Bind (or detach, with fn == NULL) the layout measurement sink of the current context
+void GuiSetFitSink(void *sink, GuiFitSinkFn fn)
+{
+    guiCapture.fitSink = sink;
+    guiCapture.fitReport = fn;
+}
+
 // Get the current captured control id for the current context
 // Returns tentativeId on the press frame, capturedId after confirmation, 0 when idle.
 unsigned int GuiGetCapturedId(void)
@@ -2724,6 +2755,7 @@ bool GuiIsEditing(void)
 // Window Box control
 int GuiWindowBox(Rectangle bounds, const char *title)
 {
+    GuiFitReport(bounds);
     // Window title bar height (including borders)
     // NOTE: This define is also used by GuiMessageBox() and GuiTextInputBox()
     #if !defined(RAYGUI_WINDOWBOX_STATUSBAR_HEIGHT)
@@ -2782,6 +2814,7 @@ int GuiWindowBox(Rectangle bounds, const char *title)
 // Group Box control with text name
 int GuiGroupBox(Rectangle bounds, const char *text)
 {
+    GuiFitReport(bounds);
     #if !defined(RAYGUI_GROUPBOX_LINE_THICK)
         #define RAYGUI_GROUPBOX_LINE_THICK     1
     #endif
@@ -2804,6 +2837,7 @@ int GuiGroupBox(Rectangle bounds, const char *text)
 // Line control
 int GuiLine(Rectangle bounds, const char *text)
 {
+    GuiFitReport(bounds);
     #if !defined(RAYGUI_LINE_MARGIN_TEXT)
         #define RAYGUI_LINE_MARGIN_TEXT  12
     #endif
@@ -2840,6 +2874,7 @@ int GuiLine(Rectangle bounds, const char *text)
 // Panel control
 int GuiPanel(Rectangle bounds, const char *text)
 {
+    GuiFitReport(bounds);
     #if !defined(RAYGUI_PANEL_BORDER_WIDTH)
         #define RAYGUI_PANEL_BORDER_WIDTH   1
     #endif
@@ -2875,6 +2910,7 @@ int GuiPanel(Rectangle bounds, const char *text)
 // history is stored; scrollbar drags keep their own capture.
 int GuiScrollPanel(Rectangle bounds, const char *text, Rectangle content, Vector2 *scroll, Rectangle *view)
 {
+    GuiFitReport(bounds);
     #define RAYGUI_MIN_SCROLLBAR_WIDTH     40
     #define RAYGUI_MIN_SCROLLBAR_HEIGHT    40
     #define RAYGUI_MIN_MOUSE_WHEEL_SPEED   20
@@ -3053,6 +3089,7 @@ int GuiScrollPanel(Rectangle bounds, const char *text, Rectangle content, Vector
 // Label control
 int GuiLabel(Rectangle bounds, const char *text)
 {
+    GuiFitReport(bounds);
     int result = RESULT_NONE;
     GuiState state = guiState;
 
@@ -3072,6 +3109,7 @@ int GuiLabel(Rectangle bounds, const char *text)
 // Button control, returns true when clicked
 int GuiButton(Rectangle bounds, const char *text)
 {
+    GuiFitReport(bounds);
     int result = RESULT_NONE;
     GuiState state = guiState;
 
@@ -3105,6 +3143,7 @@ int GuiButton(Rectangle bounds, const char *text)
 // Label button control
 int GuiLabelButton(Rectangle bounds, const char *text)
 {
+    GuiFitReport(bounds);
     int result = RESULT_NONE;
     GuiState state = guiState;
 
@@ -3139,6 +3178,7 @@ int GuiLabelButton(Rectangle bounds, const char *text)
 // Toggle Button control
 int GuiToggle(Rectangle bounds, const char *text, bool *active)
 {
+    GuiFitReport(bounds);
     int result = RESULT_NONE;
     GuiState state = guiState;
 
@@ -3188,6 +3228,7 @@ int GuiToggle(Rectangle bounds, const char *text, bool *active)
 // Toggle Group control
 int GuiToggleGroup(Rectangle bounds, const char *text, int *active)
 {
+    GuiFitReport(bounds);
     int result = RESULT_NONE;
 
     #if !defined(RAYGUI_TOGGLEGROUP_MAX_ITEM_TEXT_SIZE)
@@ -3280,6 +3321,7 @@ int GuiToggleGroup(Rectangle bounds, const char *text, int *active)
 // Toggle Slider control extended
 int GuiToggleSlider(Rectangle bounds, const char *text, int *active)
 {
+    GuiFitReport(bounds);
     int result = RESULT_NONE;
     GuiState state = guiState;
 
@@ -3354,6 +3396,7 @@ int GuiToggleSlider(Rectangle bounds, const char *text, int *active)
 // Check Box control, returns 1 when state changed
 int GuiCheckBox(Rectangle bounds, const char *text, bool *checked)
 {
+    GuiFitReport(bounds);
     int result = RESULT_NONE;
     GuiState state = guiState;
 
@@ -3421,6 +3464,7 @@ int GuiCheckBox(Rectangle bounds, const char *text, bool *checked)
 // Combo Box control
 int GuiComboBox(Rectangle bounds, const char *text, int *active)
 {
+    GuiFitReport(bounds);
     int result = RESULT_NONE;
     GuiState state = guiState;
 
@@ -3495,6 +3539,7 @@ int GuiComboBox(Rectangle bounds, const char *text, int *active)
 // modal: clicking outside closes it without activating the controls underneath.
 int GuiDropdownBox(Rectangle bounds, const char *text, int *active)
 {
+    GuiFitReport(bounds);
     int result = RESULT_NONE;
     GuiState state = guiState;
 
@@ -4173,6 +4218,7 @@ static int GuiTextBoxStyled(Rectangle bounds, char *text, int textSize, int styl
 // NOTE: Public entry using TEXTBOX styling; commit and edit focus are internal.
 int GuiTextBox(Rectangle bounds, char *text, int textSize)
 {
+    GuiFitReport(bounds);
     return GuiTextBoxStyled(bounds, text, textSize, TEXTBOX, GuiGetStyle(TEXTBOX, TEXT_READONLY) != 0);
 }
 
@@ -4181,6 +4227,7 @@ int GuiTextBox(Rectangle bounds, char *text, int textSize)
 // NOTE: This text-box is readonly, no editing supported by default
 bool GuiTextBoxMulti(Rectangle bounds, char *text, int textSize)
 {
+    GuiFitReport(bounds);
     bool pressed = false;
 
     GuiSetStyle(TEXTBOX, TEXT_READONLY, 1);
@@ -4204,6 +4251,7 @@ bool GuiTextBoxMulti(Rectangle bounds, char *text, int textSize)
 // arrow while the value box is editing first commits the editor (modal), then steps.
 int GuiSpinner(Rectangle bounds, const char *text, int *value, int minValue, int maxValue)
 {
+    GuiFitReport(bounds);
     int result = RESULT_NONE;
     GuiState state = guiState;
 
@@ -4272,6 +4320,7 @@ int GuiSpinner(Rectangle bounds, const char *text, int *value, int minValue, int
 // maxValue <= minValue the range limit is disabled.
 int GuiValueBox(Rectangle bounds, const char *text, int *value, int minValue, int maxValue)
 {
+    GuiFitReport(bounds);
     int result = RESULT_NONE;
     GuiState state = guiState;
 
@@ -4377,6 +4426,7 @@ int GuiValueBox(Rectangle bounds, const char *text, int *value, int minValue, in
 // maxValue > minValue enables clamping; maxValue <= minValue disables the range limit.
 int GuiValueBoxFloat(Rectangle bounds, const char *text, float *value, float minValue, float maxValue)
 {
+    GuiFitReport(bounds);
     int result = RESULT_NONE;
     GuiState state = guiState;
 
@@ -4480,6 +4530,7 @@ int GuiValueBoxFloat(Rectangle bounds, const char *text, float *value, float min
 // NOTE: Other GuiSlider*() controls use this one
 int GuiSlider(Rectangle bounds, const char *textLeft, const char *textRight, float *value, float minValue, float maxValue)
 {
+    GuiFitReport(bounds);
     int result = RESULT_NONE;
     GuiState state = guiState;
 
@@ -4586,6 +4637,7 @@ int GuiSlider(Rectangle bounds, const char *textLeft, const char *textRight, flo
 // Slider Bar control extended, returns selected value
 int GuiSliderBar(Rectangle bounds, const char *textLeft, const char *textRight, float *value, float minValue, float maxValue)
 {
+    GuiFitReport(bounds);
     int result = RESULT_NONE;
     int preSliderWidth = GuiGetStyle(SLIDER, SLIDER_WIDTH);
     GuiSetStyle(SLIDER, SLIDER_WIDTH, 0);
@@ -4598,6 +4650,7 @@ int GuiSliderBar(Rectangle bounds, const char *textLeft, const char *textRight, 
 // Progress Bar control extended, shows current progress value
 int GuiProgressBar(Rectangle bounds, const char *textLeft, const char *textRight, float *value, float minValue, float maxValue)
 {
+    GuiFitReport(bounds);
     int result = RESULT_NONE;
     GuiState state = guiState;
 
@@ -4688,6 +4741,7 @@ int GuiProgressBar(Rectangle bounds, const char *textLeft, const char *textRight
 // Status Bar control
 int GuiStatusBar(Rectangle bounds, const char *text)
 {
+    GuiFitReport(bounds);
     int result = RESULT_NONE;
     GuiState state = guiState;
 
@@ -4716,6 +4770,7 @@ int GuiStatusBar(Rectangle bounds, const char *text)
 // Dummy rectangle control, intended for placeholding
 int GuiDummyRec(Rectangle bounds, const char *text)
 {
+    GuiFitReport(bounds);
     int result = RESULT_NONE;
     GuiState state = guiState;
 
@@ -4747,6 +4802,7 @@ int GuiDummyRec(Rectangle bounds, const char *text)
 // List View control
 int GuiListView(Rectangle bounds, const char *text, int *scrollIndex, int *active)
 {
+    GuiFitReport(bounds);
     int result = RESULT_NONE;
     int itemCount = 0;
     char **items = NULL;
@@ -4761,6 +4817,7 @@ int GuiListView(Rectangle bounds, const char *text, int *scrollIndex, int *activ
 // List View control using text entries list and returning focus entry
 int GuiListViewEx(Rectangle bounds, char **text, int count, int *scrollIndex, int *active, int *focus)
 {
+    GuiFitReport(bounds);
     int result = RESULT_NONE;
     GuiState state = guiState;
 
@@ -4913,6 +4970,7 @@ int GuiListViewEx(Rectangle bounds, char **text, int count, int *scrollIndex, in
 // Tab Bar control
 int GuiTabBar(Rectangle bounds, const char *text, int *hscroll, int *active)
 {
+    GuiFitReport(bounds);
     int result = RESULT_NONE;
     int itemCount = 0;
     char **items = NULL;
@@ -4929,6 +4987,7 @@ int GuiTabBar(Rectangle bounds, const char *text, int *hscroll, int *active)
 // TODO: Reeplace GuiToggle() usage for custom implementation for the TABS
 int GuiTabBarEx(Rectangle bounds, char **text, int count, int *hscroll, int *active, int *focus)
 {
+    GuiFitReport(bounds);
     int result = RESULT_NONE;
     //GuiState state = guiState;
 
@@ -5013,6 +5072,7 @@ int GuiTabBarEx(Rectangle bounds, char **text, int count, int *hscroll, int *act
 // Color Panel control
 int GuiColorPanel(Rectangle bounds, const char *text, Color *color)
 {
+    GuiFitReport(bounds);
     int result = RESULT_NONE;
 
     Vector3 vcolor = { (float)color->r/255.0f, (float)color->g/255.0f, (float)color->b/255.0f };
@@ -5038,6 +5098,7 @@ int GuiColorPanel(Rectangle bounds, const char *text, Color *color)
 // NOTE: Returns alpha value normalized [0..1]
 int GuiColorBarAlpha(Rectangle bounds, const char *text, float *alpha)
 {
+    GuiFitReport(bounds);
     #if !defined(RAYGUI_COLORBARALPHA_CHECKED_SIZE)
         #define RAYGUI_COLORBARALPHA_CHECKED_SIZE   10
     #endif
@@ -5111,6 +5172,7 @@ int GuiColorBarAlpha(Rectangle bounds, const char *text, float *alpha)
 //      float GuiColorBarLuminance() [BLACK->WHITE]
 int GuiColorBarHue(Rectangle bounds, const char *text, float *hue)
 {
+    GuiFitReport(bounds);
     int result = RESULT_NONE;
     GuiState state = guiState;
 
@@ -5190,6 +5252,7 @@ int GuiColorBarHue(Rectangle bounds, const char *text, float *hue)
 // NOTE: this picker converts RGB to HSV, which can cause the Hue control to jump. If you have this problem, consider using the HSV variant instead
 int GuiColorPicker(Rectangle bounds, const char *text, Color *color)
 {
+    GuiFitReport(bounds);
     int result = RESULT_NONE;
 
     Color temp = { 200, 0, 0, 255 };
@@ -5224,6 +5287,7 @@ int GuiColorPicker(Rectangle bounds, const char *text, Color *color)
 // so the panel passed to GuiColorPanelHSV() is shrunk by HUEBAR_PADDING + HUEBAR_WIDTH on the right
 int GuiColorPickerHSV(Rectangle bounds, const char *text, Vector3 *colorHsv)
 {
+    GuiFitReport(bounds);
     int result = RESULT_NONE;
 
     Vector3 tempHsv = { 0 };
@@ -5248,6 +5312,7 @@ int GuiColorPickerHSV(Rectangle bounds, const char *text, Vector3 *colorHsv)
 // Color Panel control - HSV variant
 int GuiColorPanelHSV(Rectangle bounds, const char *text, Vector3 *colorHsv)
 {
+    GuiFitReport(bounds);
     int result = RESULT_NONE;
     GuiState state = guiState;
 
@@ -5324,6 +5389,7 @@ int GuiColorPanelHSV(Rectangle bounds, const char *text, Vector3 *colorHsv)
 // NOTE: Button pressed is returned through btnActive parameter, 0 for window close button
 int GuiMessageBox(Rectangle bounds, const char *title, const char *message, const char *btnText, int *btnActive)
 {
+    GuiFitReport(bounds);
     #if !defined(RAYGUI_MESSAGEBOX_BUTTON_HEIGHT)
         #define RAYGUI_MESSAGEBOX_BUTTON_HEIGHT    24
     #endif
@@ -5385,6 +5451,7 @@ int GuiMessageBox(Rectangle bounds, const char *title, const char *message, cons
 // NOTE: Button pressed is returned through btnActive parameter, 0 for window close button
 int GuiTextInputBox(Rectangle bounds, const char *title, const char *message, char *text, int textSize, const char *btnText, int *btnActive, bool *secretViewActive)
 {
+    GuiFitReport(bounds);
     #if !defined(RAYGUI_TEXTINPUTBOX_BUTTON_HEIGHT)
         #define RAYGUI_TEXTINPUTBOX_BUTTON_HEIGHT      24
     #endif
@@ -5501,6 +5568,7 @@ int GuiTextInputBox(Rectangle bounds, const char *title, const char *message, ch
 // REF: https://stackoverflow.com/questions/4435450/2d-opengl-drawing-lines-that-dont-exactly-fit-pixel-raster
 int GuiGrid(Rectangle bounds, const char *text, float spacing, int subdivs, Vector2 *mouseCell)
 {
+    GuiFitReport(bounds);
     // Grid lines alpha amount
     #if !defined(RAYGUI_GRID_ALPHA)
         #define RAYGUI_GRID_ALPHA    0.15f
