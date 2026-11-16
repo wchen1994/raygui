@@ -1776,7 +1776,6 @@ static GuiContext *guiCurrentContext = &guiDefaultContext;
 static GuiInput *guiFrameInputs = NULL;              // Inputs injected for this frame (caller-owned)
 static int guiFrameInputCount = 0;
 static GuiInput guiEmptyInput = { { -1000000.0f, -1000000.0f }, false, false, false, 0, false }; // Fallback when a context has no bound input
-static unsigned int guiFrameCounter = 0;             // Global frame stamp
 static bool guiFrameInProgress = false;
 static GuiContext *guiFrameContextList = NULL;       // Contexts drawn this frame
 static float guiDragThreshold = 5.0f;
@@ -2271,7 +2270,12 @@ static void GuiPrepareContext(GuiContext *ctx)
     bool wasDragActive = ctx->dragActive;
 
     ctx->inFrame = true;
-    ctx->frameCounter = guiFrameCounter;
+    /* Per-context frame stamp: advance our own counter, independent of how many
+     * sibling contexts are prepared in the same physical frame (e.g. a parent
+     * and child VM each running their own GuiBegin/End pair). The shared global
+     * counter used to jump by N per physical frame here, which broke the +1
+     * continuity test below for every context except the first one prepared. */
+    ctx->frameCounter++;
     ctx->nextId = 1;
     ctx->scopeDepth = 0;
     ctx->hitStackCount = 0;
@@ -2287,7 +2291,10 @@ static void GuiPrepareContext(GuiContext *ctx)
 
     // Drag delta is input-layer state: controls only read it instead of tracking history.
     // A context that was not prepared on the previous frame starts a fresh history.
-    bool continuous = (previousFrame != 0) && ((previousFrame + 1) == guiFrameCounter);
+    // The stamp is per-context now: it advances by exactly one on every prepare,
+    // so a sibling context opening its own GUI frame in-between can no longer
+    // make this context look "discontinuous" and wipe its drag history.
+    bool continuous = (previousFrame != 0) && ((previousFrame + 1) == ctx->frameCounter);
     if (!continuous) ctx->hasPointerHistory = false;
 
     ctx->dragDelta = RAYGUI_CLITERAL(Vector2){ 0.0f, 0.0f };
@@ -2449,7 +2456,6 @@ void GuiBegin(GuiInput *inputs, int inputCount)
         guiFrameInputCount = inputCount;
     }
 
-    guiFrameCounter++;
     guiFrameContextList = NULL;
     guiFrameInProgress = true;
 
@@ -2485,7 +2491,10 @@ void GuiPushContext(GuiContext *ctx)
     guiCurrentContext = ctx;
     GuiSelectContextInput(ctx);
 
-    if (!ctx->inFrame || (ctx->frameCounter != guiFrameCounter))
+    // Per-context stamp: inFrame is cleared by GuiFinalizeContext() when its
+    // owning VM called GuiEnd(), so it reliably tells us "not prepared yet this
+    // frame". No global counter to compare against any more.
+    if (!ctx->inFrame)
     {
         GuiPrepareContext(ctx);
         GuiAddFrameContext(ctx);
