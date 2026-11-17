@@ -3412,27 +3412,29 @@ int GuiCheckBox(Rectangle bounds, const char *text, bool *checked)
     bool temp = false;
     if (checked == NULL) checked = &temp;
 
+    Rectangle checkBounds = {bounds.x, bounds.y, bounds.height, bounds.height};
     Rectangle textBounds = { 0 };
 
     if (text != NULL)
     {
-        textBounds.width = (float)GuiGetTextWidth(text) + 2;
+        // textBounds.width = (float)GuiGetTextWidth(text) + 2;
+        textBounds.width = bounds.width - checkBounds.width;
         textBounds.height = (float)GuiGetStyle(DEFAULT, TEXT_SIZE);
-        textBounds.x = bounds.x + bounds.width + GuiGetStyle(CHECKBOX, TEXT_PADDING);
+        textBounds.x = bounds.x + checkBounds.width + GuiGetStyle(CHECKBOX, TEXT_PADDING);
         textBounds.y = bounds.y + bounds.height/2 - GuiGetStyle(DEFAULT, TEXT_SIZE)/2;
         if (GuiGetStyle(CHECKBOX, TEXT_ALIGNMENT) == TEXT_ALIGN_LEFT) textBounds.x = bounds.x - textBounds.width - GuiGetStyle(CHECKBOX, TEXT_PADDING);
     }
 
     // Update control
     //--------------------------------------------------------------------
-    Rectangle totalBounds = {
-        (GuiGetStyle(CHECKBOX, TEXT_ALIGNMENT) == TEXT_ALIGN_LEFT)? textBounds.x : bounds.x,
-        bounds.y,
-        bounds.width + textBounds.width + GuiGetStyle(CHECKBOX, TEXT_PADDING),
-        bounds.height,
-    };
+    // Rectangle totalBounds = {
+    //     (GuiGetStyle(CHECKBOX, TEXT_ALIGNMENT) == TEXT_ALIGN_LEFT)? textBounds.x : bounds.x,
+    //     bounds.y,
+    //     bounds.width + textBounds.width + GuiGetStyle(CHECKBOX, TEXT_PADDING),
+    //     bounds.height,
+    // };
 
-    GuiControlBegin(totalBounds, GUI_DRAG_NONE);
+    GuiControlBegin(bounds, GUI_DRAG_NONE);
     if (state != STATE_DISABLED)
     {
         // Check checkbox state
@@ -3453,14 +3455,14 @@ int GuiCheckBox(Rectangle bounds, const char *text, bool *checked)
 
     // Draw control
     //--------------------------------------------------------------------
-    GuiDrawRectangle(bounds, GuiGetStyle(CHECKBOX, BORDER_WIDTH), GetColor(GuiGetStyle(CHECKBOX, BORDER + (state*3))), BLANK);
+    GuiDrawRectangle(checkBounds, GuiGetStyle(CHECKBOX, BORDER_WIDTH), GetColor(GuiGetStyle(CHECKBOX, BORDER + (state*3))), BLANK);
 
     if (*checked)
     {
-        Rectangle check = { bounds.x + GuiGetStyle(CHECKBOX, BORDER_WIDTH) + GuiGetStyle(CHECKBOX, CHECK_PADDING),
-                            bounds.y + GuiGetStyle(CHECKBOX, BORDER_WIDTH) + GuiGetStyle(CHECKBOX, CHECK_PADDING),
-                            bounds.width - 2*(GuiGetStyle(CHECKBOX, BORDER_WIDTH) + GuiGetStyle(CHECKBOX, CHECK_PADDING)),
-                            bounds.height - 2*(GuiGetStyle(CHECKBOX, BORDER_WIDTH) + GuiGetStyle(CHECKBOX, CHECK_PADDING)) };
+        Rectangle check = { checkBounds.x + GuiGetStyle(CHECKBOX, BORDER_WIDTH) + GuiGetStyle(CHECKBOX, CHECK_PADDING),
+                            checkBounds.y + GuiGetStyle(CHECKBOX, BORDER_WIDTH) + GuiGetStyle(CHECKBOX, CHECK_PADDING),
+                            checkBounds.width - 2*(GuiGetStyle(CHECKBOX, BORDER_WIDTH) + GuiGetStyle(CHECKBOX, CHECK_PADDING)),
+                            checkBounds.height - 2*(GuiGetStyle(CHECKBOX, BORDER_WIDTH) + GuiGetStyle(CHECKBOX, CHECK_PADDING)) };
         GuiDrawRectangle(check, 0, BLANK, GetColor(GuiGetStyle(CHECKBOX, TEXT + state*3)));
     }
 
