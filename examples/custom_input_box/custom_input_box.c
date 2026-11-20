@@ -15,6 +15,9 @@
 
 #define RAYGUI_IMPLEMENTATION
 #include "../../src/raygui.h"
+#include "../raygui_host_input.h"
+
+static GuiContext guiContext = { 0 };
 
 int guiFloatingPointIndex = 0;      // Global variable shared by all GuiFloatBox()
 
@@ -45,7 +48,7 @@ int main()
 		//----------------------------------------------------------------------------------
 		BeginDrawing();
 
-            GuiBeginFromRaylib();
+            GuiHostBeginMouse(&guiContext);
 
 		ClearBackground(RAYWHITE);
 
@@ -77,7 +80,7 @@ int main()
 		
 		GuiFloatBox((Rectangle){ 55, 40, 135, 20 }, "= ", &result, -2000000.0, 2000000.0, false);
 		
-            GuiEndFromRaylib();
+            GuiEnd();
 
 		EndDrawing();
         //----------------------------------------------------------------------------------

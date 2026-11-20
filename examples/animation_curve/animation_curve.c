@@ -20,6 +20,9 @@
 #define RAYGUI_WINDOWBOX_STATUSBAR_HEIGHT 24
 #define RAYGUI_IMPLEMENTATION
 #include "../../src/raygui.h"
+#include "../raygui_host_input.h"
+
+static GuiContext guiContext = { 0 };
 
 // raygui embedded styles
 #include "../styles/style_cyber.h"       // raygui style: cyber
@@ -146,7 +149,7 @@ int main()
         //----------------------------------------------------------------------------------
         BeginDrawing();
 
-            GuiBeginFromRaylib();
+            GuiHostBeginMouse(&guiContext);
             ClearBackground(GetColor( GuiGetStyle(DEFAULT, BACKGROUND_COLOR)));
 
             // Scene
@@ -346,7 +349,7 @@ int main()
             // Time panel shadow
             DrawRectangleGradientV(timeLineRect.x, timeLineRect.y - 12, timeLineRect.width, 12, BLANK, (Color){ 0, 0, 0, 100 });
 
-            GuiEndFromRaylib();
+            GuiEnd();
 
         EndDrawing();
         //----------------------------------------------------------------------------------

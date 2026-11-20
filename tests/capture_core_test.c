@@ -9,7 +9,7 @@
 *       - hover ownership (topmost hit, capture holder)
 *       - modal interception for text boxes and dropdowns
 *       - one discrete control trigger per frame
-*       - explicit GuiInput injection, sibling contexts and touch routing
+*       - host-owned GuiContext pointer injection and pointerCaptured write-back
 *       - GuiCancel / GuiReleaseCapture / runtime drag threshold
 *
 *   LICENSE: zlib/libpng
@@ -21,13 +21,9 @@
 
 #define RAYGUI_STANDALONE
 
-// Fake input is provided through the standalone backend functions; these macros
-// route raygui pointer inputs to them (expanded inside the implementation)
-#define GUI_BUTTON_DOWN         IsMouseButtonDown(0)
-#define GUI_BUTTON_PRESSED      IsMouseButtonPressed(0)
-#define GUI_BUTTON_RELEASED     IsMouseButtonReleased(0)
+// Pointer state is injected through GuiContext; the standalone backend still supplies
+// the auxiliary wheel/keyboard input used by a few controls.
 #define GUI_SCROLL_DELTA        GetMouseWheelMove()
-#define GUI_POINTER_POSITION    GetMousePosition()
 #define GUI_KEY_DOWN(key)       IsKeyDown(key)
 #define GUI_KEY_PRESSED(key)    IsKeyPressed(key)
 #define GUI_INPUT_KEY           GetCharPressed()
@@ -152,17 +148,27 @@ static void ResetGui(void)
     gMouseReleased = false;
 }
 
-// Start a frame with the given pointer state (the GUI snapshots it at GuiBeginFrame)
+// Start a frame on the default context with the given pointer state
 static void Begin(Vector2 position, bool down, bool pressed, bool released)
 {
-    gMouse = position;
-    gMouseDown = down;
-    gMousePressed = pressed;
-    gMouseReleased = released;
-    GuiBeginFrame();
+    guiCapture.pointerPosition = position;
+    guiCapture.pointerDown = down;
+    guiCapture.pointerPressed = pressed;
+    guiCapture.pointerReleased = released;
+    GuiBegin(NULL);
 }
 
-static void End(void) { GuiEndFrame(); }
+static void End(void) { GuiEnd(); }
+
+// Helper for tests that own their context: fill the pointer snapshot before GuiBegin
+static void BeginContext(GuiContext *ctx, Vector2 position, bool down, bool pressed, bool released)
+{
+    ctx->pointerPosition = position;
+    ctx->pointerDown = down;
+    ctx->pointerPressed = pressed;
+    ctx->pointerReleased = released;
+    GuiBegin(ctx);
+}
 
 // Press on the given position and release on the next frame at the same place
 static void PressRelease(Vector2 position, void (*draw)(void))
@@ -1399,76 +1405,70 @@ static void DrawCtxRightSlider(void)
     gCtxSliderResult = GuiSlider(RAYGUI_CLITERAL(Rectangle){ 120, 10, 80, 20 }, NULL, NULL, &gCtxSliderValue, 0.0f, 1.0f);
 }
 
-static void DrawTwoContexts(GuiContext *left, GuiContext *right, bool slider)
+static void DrawCtxLeftUI(bool slider)
 {
-    GuiPushContext(left);
     if (slider) DrawCtxLeftSlider();
     else DrawCtxButtonA();
-    GuiPopContext();
-
-    GuiPushContext(right);
-    DrawCtxRightButton();
-    GuiPopContext();
 }
 
 static void TestExplicitInputClick(void)
 {
     ResetGui();
     gButtonClicks = 0;
+    GuiContext ctx = { 0 };
 
-    GuiInput input = { { 10, 10 }, true, false, true, 0 };
-    GuiBegin(&input, 1);
+    BeginContext(&ctx, RAYGUI_CLITERAL(Vector2){ 10, 10 }, true, true, false);
+    DrawSingleButton();
+    GuiEnd();
+    CHECK(ctx.pointerCaptured, "press over a control is reported as captured at GuiEnd");
+
+    BeginContext(&ctx, RAYGUI_CLITERAL(Vector2){ 10, 10 }, true, false, false);
     DrawSingleButton();
     GuiEnd();
 
-    input.pressed = false;
-    GuiBegin(&input, 1);
+    BeginContext(&ctx, RAYGUI_CLITERAL(Vector2){ 10, 10 }, false, false, true);
     DrawSingleButton();
     GuiEnd();
+    CHECK(gButtonClicks == 1, "explicit context click is delivered on release");
 
-    input.released = true;
-    input.down = false;
-    GuiBegin(&input, 1);
+    BeginContext(&ctx, RAYGUI_CLITERAL(Vector2){ 10, 10 }, false, false, false);
     DrawSingleButton();
     GuiEnd();
-
-    CHECK(gButtonClicks == 1, "GuiBegin() click is delivered on release");
+    CHECK(!ctx.pointerCaptured, "idle frame after release is not captured");
 }
 
-static void TestMultiContextIndependentTouches(void)
+static void TestMultiContextIndependentPointers(void)
 {
     ResetGui();
     GuiContext left = { 0 };
     GuiContext right = { 0 };
     gCtxClicksA = 0;
     gCtxClicksB = 0;
-    gCtxSliderValue = 0.2f;
 
-    GuiInput inputs[2] = {
-        { { 20, 20 }, true, false, true, 0 },
-        { { 140, 20 }, true, false, true, 1 }
-    };
+    BeginContext(&left, RAYGUI_CLITERAL(Vector2){ 20, 20 }, true, true, false);
+    DrawCtxLeftUI(false);
+    GuiEnd();
+    BeginContext(&right, RAYGUI_CLITERAL(Vector2){ 140, 20 }, true, true, false);
+    DrawCtxRightButton();
+    GuiEnd();
+    CHECK(left.pointerCaptured && right.pointerCaptured, "each context captures its own pointer");
 
-    GuiBegin(inputs, 2);
-    DrawTwoContexts(&left, &right, false);
+    BeginContext(&left, RAYGUI_CLITERAL(Vector2){ 20, 20 }, true, false, false);
+    DrawCtxLeftUI(false);
+    GuiEnd();
+    BeginContext(&right, RAYGUI_CLITERAL(Vector2){ 140, 20 }, true, false, false);
+    DrawCtxRightButton();
     GuiEnd();
 
-    inputs[0].pressed = false;
-    inputs[1].pressed = false;
-    GuiBegin(inputs, 2);
-    DrawTwoContexts(&left, &right, false);
+    BeginContext(&left, RAYGUI_CLITERAL(Vector2){ 20, 20 }, false, false, true);
+    DrawCtxLeftUI(false);
+    GuiEnd();
+    BeginContext(&right, RAYGUI_CLITERAL(Vector2){ 140, 20 }, false, false, true);
+    DrawCtxRightButton();
     GuiEnd();
 
-    inputs[0].down = false;
-    inputs[0].released = true;
-    inputs[1].down = false;
-    inputs[1].released = true;
-    GuiBegin(inputs, 2);
-    DrawTwoContexts(&left, &right, false);
-    GuiEnd();
-
-    CHECK(gCtxClicksA == 1, "left context receives its own touch");
-    CHECK(gCtxClicksB == 1, "right context receives its own touch");
+    CHECK(gCtxClicksA == 1, "left context receives its own pointer");
+    CHECK(gCtxClicksB == 1, "right context receives its own pointer");
 }
 
 static void TestContextCaptureStaysRouted(void)
@@ -1480,84 +1480,61 @@ static void TestContextCaptureStaysRouted(void)
     gCtxClicksB = 0;
     gCtxSliderValue = 0.2f;
 
-    GuiInput inputs[1] = { { { 20, 15 }, true, false, true, 0 } };
-
-    GuiBegin(inputs, 1);
-    DrawTwoContexts(&left, &right, true);
+    BeginContext(&left, RAYGUI_CLITERAL(Vector2){ 20, 15 }, true, true, false);
+    DrawCtxLeftUI(true);
+    GuiEnd();
+    BeginContext(&right, RAYGUI_CLITERAL(Vector2){ 140, 20 }, false, false, false);
+    DrawCtxRightButton();
     GuiEnd();
 
-    // Move outside the left context bounds but keep holding the touch
-    inputs[0].position = RAYGUI_CLITERAL(Vector2){ 150, 15 };
-    inputs[0].pressed = false;
-    GuiBegin(inputs, 1);
-    DrawTwoContexts(&left, &right, true);
+    // The host keeps routing the held pointer to the left context even outside its bounds
+    BeginContext(&left, RAYGUI_CLITERAL(Vector2){ 150, 15 }, true, false, false);
+    DrawCtxLeftUI(true);
+    GuiEnd();
+    CHECK(left.pointerCaptured, "a dragged pointer stays captured by its context");
+
+    BeginContext(&right, RAYGUI_CLITERAL(Vector2){ 140, 20 }, false, false, false);
+    DrawCtxRightButton();
     GuiEnd();
 
-    CHECK(gCtxSliderValue > 0.2f, "context keeps updating while the touch leaves its bounds");
+    CHECK(gCtxSliderValue > 0.2f, "context keeps updating while the pointer leaves its bounds");
 
-    inputs[0].down = false;
-    inputs[0].released = true;
-    GuiBegin(inputs, 1);
-    DrawTwoContexts(&left, &right, true);
+    BeginContext(&left, RAYGUI_CLITERAL(Vector2){ 150, 15 }, false, false, true);
+    DrawCtxLeftUI(true);
     GuiEnd();
 
-    CHECK(gCtxClicksB == 0, "a captured touch is not rerouted to another context");
+    CHECK(gCtxClicksB == 0, "another context never sees a pointer owned by the first one");
 }
 
-static void TestContextInputOccupation(void)
+static void TestPointerCapturedWriteBack(void)
 {
     ResetGui();
-    GuiContext left = { 0 };
-    GuiContext right = { 0 };
-    gCtxClicksA = 0;
-    gCtxClicksB = 0;
+    GuiContext ctx = { 0 };
 
-    GuiInput inputs[2] = {
-        { { 20, 20 }, true, false, true, 0, false },
-        { { 140, 20 }, true, false, true, 1, false }
-    };
-
-    GuiBegin(inputs, 2);
-    GuiPushContext(&left);
-    DrawCtxButtonA();
-    GuiPopContext();
-    CHECK(inputs[0].occupied, "held input is occupied when its context pops");
-
-    GuiPushContext(&right);
-    DrawCtxRightButton();
-    GuiPopContext();
-    CHECK(inputs[1].occupied, "next context takes the next free input");
+    BeginContext(&ctx, RAYGUI_CLITERAL(Vector2){ 500, 500 }, true, true, false);
+    DrawSingleButton();
     GuiEnd();
+    CHECK(!ctx.pointerCaptured, "pressing empty space is not captured");
 
-    inputs[0].pressed = false;
-    inputs[1].pressed = false;
-    GuiBegin(inputs, 2);
-    CHECK(!inputs[0].occupied && !inputs[1].occupied, "GuiBegin resets input occupation");
-
-    GuiPushContext(&left);
-    DrawCtxButtonA();
-    GuiPopContext();
-    GuiPushContext(&right);
-    DrawCtxRightButton();
-    GuiPopContext();
+    BeginContext(&ctx, RAYGUI_CLITERAL(Vector2){ 10, 10 }, true, true, false);
+    DrawSingleButton();
     GuiEnd();
+    CHECK(ctx.pointerCaptured, "pressing a control is captured");
 
-    inputs[0].down = false;
-    inputs[0].released = true;
-    inputs[1].down = false;
-    inputs[1].released = true;
-    GuiBegin(inputs, 2);
-
-    GuiPushContext(&left);
-    DrawCtxButtonA();
-    GuiPopContext();
-    GuiPushContext(&right);
-    DrawCtxRightButton();
-    GuiPopContext();
+    BeginContext(&ctx, RAYGUI_CLITERAL(Vector2){ 60, 10 }, true, false, false);
+    DrawSingleButton();
     GuiEnd();
+    CHECK(ctx.pointerCaptured, "captured stays true across the drag threshold");
 
-    CHECK(gCtxClicksA == 1, "left context clicks with its input");
-    CHECK(gCtxClicksB == 1, "right context clicks with its input");
+    BeginContext(&ctx, RAYGUI_CLITERAL(Vector2){ 60, 10 }, false, false, true);
+    DrawSingleButton();
+    GuiEnd();
+    CHECK(ctx.pointerCaptured, "release frame still belongs to the holder");
+
+    BeginContext(&ctx, RAYGUI_CLITERAL(Vector2){ 60, 10 }, false, false, false);
+    DrawSingleButton();
+    GuiEnd();
+    CHECK(!ctx.pointerCaptured, "capture is cleared on the following idle frame");
 }
 
 static int gCtxTextResult = RESULT_NONE;
@@ -1576,54 +1553,35 @@ static void TestContextModalGetsNextTouch(void)
     gCtxTextResult = RESULT_NONE;
     strcpy(gTextBoxText, "abc");
 
-    GuiInput input = { { 10, 10 }, true, false, true, 0, false };
-    GuiBegin(&input, 1);
-    GuiPushContext(&left);
+    BeginContext(&left, RAYGUI_CLITERAL(Vector2){ 10, 10 }, true, true, false);
     DrawCtxTextBox();
-    GuiPopContext();
     GuiEnd();
 
-    input.pressed = false;
-    input.down = false;
-    input.released = true;
-    GuiBegin(&input, 1);
-    GuiPushContext(&left);
+    BeginContext(&left, RAYGUI_CLITERAL(Vector2){ 10, 10 }, false, false, true);
     DrawCtxTextBox();
-    GuiPopContext();
     GuiEnd();
     CHECK(left.editId != 0, "left text box is editing");
 
-    input.position = RAYGUI_CLITERAL(Vector2){ 140, 20 };
-    input.pressed = true;
-    input.down = true;
-    input.released = false;
-    GuiBegin(&input, 1);
-
-    GuiPushContext(&left);
+    // The host routes the outside pointer to the editing context, not to the sibling one
+    BeginContext(&left, RAYGUI_CLITERAL(Vector2){ 140, 20 }, true, true, false);
     DrawCtxTextBox();
-    GuiPopContext();
+    GuiEnd();
+    CHECK(left.pointerCaptured, "modal interception reports the pointer as captured");
 
-    GuiPushContext(&right);
+    BeginContext(&right, RAYGUI_CLITERAL(Vector2){ 500, 500 }, false, false, false);
     DrawCtxRightButton();
-    GuiPopContext();
     GuiEnd();
 
-    input.pressed = false;
-    input.down = false;
-    input.released = true;
-    GuiBegin(&input, 1);
-
-    GuiPushContext(&left);
+    BeginContext(&left, RAYGUI_CLITERAL(Vector2){ 140, 20 }, false, false, true);
     DrawCtxTextBox();
-    GuiPopContext();
-
-    GuiPushContext(&right);
-    DrawCtxRightButton();
-    GuiPopContext();
     GuiEnd();
 
-    CHECK(gCtxTextResult == RESULT_PRESSED, "left context receives the outside press and commits");
-    CHECK(gCtxClicksB == 0, "right context does not receive the touch while left processes it");
+    BeginContext(&right, RAYGUI_CLITERAL(Vector2){ 500, 500 }, false, false, false);
+    DrawCtxRightButton();
+    GuiEnd();
+
+    CHECK(gCtxTextResult == RESULT_PRESSED, "editing context receives the outside press and commits");
+    CHECK(gCtxClicksB == 0, "sibling context never sees a pointer owned by the modal context");
 }
 
 static void TestCancelAndReleaseCapture(void)
@@ -1696,35 +1654,25 @@ static void TestDragThresholdConfig(void)
     GuiSetDragThreshold(previous);
 }
 
-static void TestDefaultContextIgnoresExtraInputs(void)
+static void TestDefaultContextFrame(void)
 {
     ResetGui();
     gCtxClicksA = 0;
 
-    GuiInput inputs[2] = {
-        { { 10, 60 }, true, false, true, 0 },
-        { { 20, 20 }, true, false, true, 1 }
-    };
-
-    GuiBegin(inputs, 2);
+    // GuiBegin(NULL) uses the built-in context; its fields are the pointer snapshot
+    Begin(RAYGUI_CLITERAL(Vector2){ 20, 20 }, true, true, false);
     DrawCtxButtonA();
-    GuiEnd();
+    End();
+    CHECK(guiCapture.pointerCaptured, "default context reports captured pointer at GuiEnd");
 
-    inputs[0].pressed = false;
-    inputs[1].pressed = false;
-    GuiBegin(inputs, 2);
+    Begin(RAYGUI_CLITERAL(Vector2){ 20, 20 }, true, false, false);
     DrawCtxButtonA();
-    GuiEnd();
+    End();
 
-    inputs[0].down = false;
-    inputs[0].released = true;
-    inputs[1].down = false;
-    inputs[1].released = true;
-    GuiBegin(inputs, 2);
+    Begin(RAYGUI_CLITERAL(Vector2){ 20, 20 }, false, false, true);
     DrawCtxButtonA();
-    GuiEnd();
-
-    CHECK(gCtxClicksA == 0, "default context only uses the first input");
+    End();
+    CHECK(gCtxClicksA == 1, "default context handles a full press/release");
 }
 
 static void TestContextCancelInsideFrame(void)
@@ -1733,50 +1681,40 @@ static void TestContextCancelInsideFrame(void)
     GuiContext ctx = { 0 };
     gCtxClicksA = 0;
 
-    GuiInput input = { { 20, 20 }, true, false, true, 0 };
-
-    GuiBegin(&input, 1);
-    GuiPushContext(&ctx);
+    BeginContext(&ctx, RAYGUI_CLITERAL(Vector2){ 20, 20 }, true, true, false);
     DrawCtxButtonA();
-    GuiPopContext();
-
     GuiCancel(&ctx);
-
-    // The same context can be pushed again in the same frame; it must not corrupt the frame list
-    GuiPushContext(&ctx);
     DrawCtxButtonA();
-    GuiPopContext();
     GuiEnd();
 
     CHECK(gCtxClicksA == 0, "cancelled press does not deliver a click");
+    CHECK(!ctx.pointerCaptured, "cancelled context does not report captured pointer");
 }
 
-static void TestContextMissingRelease(void)
+static void TestHostDrivenRelease(void)
 {
     ResetGui();
     GuiContext ctx = { 0 };
     gCtxSliderValue = 0.2f;
 
-    GuiInput input = { { 20, 15 }, true, false, true, 0 };
-
-    GuiBegin(&input, 1);
-    GuiPushContext(&ctx);
+    BeginContext(&ctx, RAYGUI_CLITERAL(Vector2){ 20, 15 }, true, true, false);
     DrawCtxLeftSlider();
-    GuiPopContext();
+    GuiEnd();
+    CHECK(ctx.pointerCaptured, "slider press is captured");
+
+    BeginContext(&ctx, RAYGUI_CLITERAL(Vector2){ 30, 15 }, true, false, false);
+    DrawCtxLeftSlider();
     GuiEnd();
 
-    // No input at all: the routed touch is treated as released instead of sticking forever
-    GuiBegin(NULL, 0);
-    GuiPushContext(&ctx);
+    // The host supplies the release event; no hidden "missing pointer" handling in raygui
+    BeginContext(&ctx, RAYGUI_CLITERAL(Vector2){ 30, 15 }, false, false, true);
     DrawCtxLeftSlider();
-    GuiPopContext();
     GuiEnd();
 
-    GuiBegin(NULL, 0);
-    GuiPushContext(&ctx);
+    BeginContext(&ctx, RAYGUI_CLITERAL(Vector2){ 30, 15 }, false, false, false);
     DrawCtxLeftSlider();
-    CHECK(GuiGetCapturedId() == 0, "missing touch release clears the context capture");
-    GuiPopContext();
+    CHECK(GuiGetCapturedId() == 0, "host-provided release clears the context capture");
+    CHECK(!ctx.pointerCaptured, "idle frame after release is not captured");
     GuiEnd();
 }
 
@@ -1818,15 +1756,15 @@ int main(void)
     TestGridDoesNotTrigger();
     TestOneDiscreteTriggerPerFrame();
     TestExplicitInputClick();
-    TestMultiContextIndependentTouches();
+    TestMultiContextIndependentPointers();
     TestContextCaptureStaysRouted();
-    TestContextInputOccupation();
+    TestPointerCapturedWriteBack();
     TestContextModalGetsNextTouch();
     TestCancelAndReleaseCapture();
     TestDragThresholdConfig();
-    TestDefaultContextIgnoresExtraInputs();
+    TestDefaultContextFrame();
     TestContextCancelInsideFrame();
-    TestContextMissingRelease();
+    TestHostDrivenRelease();
 
     printf("%d checks, %d failures\n", gChecks, gFailures);
     return (gFailures == 0)? 0 : 1;

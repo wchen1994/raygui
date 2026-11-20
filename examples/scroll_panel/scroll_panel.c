@@ -26,6 +26,9 @@
 
 #define RAYGUI_IMPLEMENTATION
 #include "../../src/raygui.h"
+#include "../raygui_host_input.h"
+
+static GuiContext guiContext = { 0 };
 
 static void DrawStyleEditControls(void);  // Draw and process scroll bar style edition controls
 
@@ -65,7 +68,7 @@ int main()
 
             ClearBackground(RAYWHITE);
 
-            GuiBeginFromRaylib();
+            GuiHostBeginMouse(&guiContext);
 
             DrawText(TextFormat("[%f, %f]", panelScroll.x, panelScroll.y), 4, 4, 20, RED);
 
@@ -107,7 +110,7 @@ int main()
 
             if (showContentArea) DrawRectangle(panelRec.x + panelScroll.x, panelRec.y + panelScroll.y, panelContentRec.width, panelContentRec.height, Fade(RED, 0.1));
 
-            GuiEndFromRaylib();
+            GuiEnd();
 
         EndDrawing();
         //----------------------------------------------------------------------------------

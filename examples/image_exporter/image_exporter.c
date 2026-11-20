@@ -19,6 +19,9 @@
 
 #define RAYGUI_IMPLEMENTATION
 #include "../../src/raygui.h"
+#include "../raygui_host_input.h"
+
+static GuiContext guiContext = { 0 };
 
 //------------------------------------------------------------------------------------
 // Program main entry point
@@ -136,7 +139,7 @@ int main(int argc, char *argv[])
         //----------------------------------------------------------------------------------
         BeginDrawing();
 
-            GuiBeginFromRaylib();
+            GuiHostBeginMouse(&guiContext);
 
             ClearBackground(RAYWHITE);
 
@@ -177,7 +180,7 @@ int main(int argc, char *argv[])
             if (btnExportPressed) DrawText("Image exported!", 20, screenHeight - 20, 20, RED);
             //-----------------------------------------------------------------------------
 
-            GuiEndFromRaylib();
+            GuiEnd();
 
         EndDrawing();
         //----------------------------------------------------------------------------------

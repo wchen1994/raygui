@@ -121,16 +121,25 @@
 *       pointer registers itself in a per-frame hit stack, so overlapping controls resolve
 *       ownership instead of interacting at the same time.
 *
-*       A frame must be started and closed explicitly:
+*       Pointer routing belongs to the host, not to raygui. A GuiContext represents exactly
+*       one pointer: fill its pointer* input fields, run the frame, then read the output
+*       field pointerCaptured after GuiEnd().
 *
-*           GuiBeginFromRaylib();                  // raylib input snapshot + frame start
+*           GuiContext gui = { 0 };                 // caller-owned, one per pointer
+*           gui.pointerPosition = hostPointer.position;
+*           gui.pointerPressed  = hostPointer.pressed;
+*           gui.pointerReleased = hostPointer.released;
+*           gui.pointerDown     = hostPointer.down;
+*           GuiBegin(&gui);
 *           if (GuiButton(saveRec, "Save")) { ... } // result is returned on release
-*           GuiEndFromRaylib();
+*           GuiEnd();
+*           if (gui.pointerCaptured) { ... }        // a control held this pointer
 *
-*       For a custom input backend inject GuiInput through GuiBegin(inputs, count)/GuiEnd(),
-*       or use GuiBeginFrame()/GuiEndFrame() when the GUI_* input macros are configured.
-*       Independent touch regions use sibling contexts: GuiPushContext(&ctx) ...
-*       GuiPopContext(); the default context only consumes the first input.
+*       GuiBegin(NULL) uses a library-owned default context. For multiple pointers keep one
+*       GuiContext per pointer and run separate Begin/End passes; raygui never reads an input
+*       array, never assigns touch ids and never calls raylib input functions. Each pass
+*       draws the UI region that pointer is allowed to reach, and the host uses
+*       pointerCaptured to decide whether to forward the pointer to the rest of the app.
 *
 *       Rules:
 *           - The press frame is capture-only: no control runs interaction side effects.
@@ -184,11 +193,14 @@
 *                         ADDED: Hover ownership (topmost hit / capture holder)
 *                         ADDED: Modal interception for TextBox and DropdownBox
 *                         ADDED: One discrete control result per context per frame
-*                         ADDED: Paired frame API: GuiBeginFrame()/GuiEndFrame() and
-*                                GuiBeginFromRaylib()/GuiEndFromRaylib()
-*                         ADDED: GuiBegin(GuiInput*, int)/GuiEnd(), per-context state,
-*                                GuiPushContext()/GuiPopContext(), multi-touch routing,
+*                         ADDED: GuiBegin(GuiContext*)/GuiEnd(), per-context pointer state,
+*                                GuiContext.pointerCaptured written back at GuiEnd(),
 *                                GuiCancel(), GuiReleaseCapture(), runtime drag threshold
+*                         REMOVED: GuiInput array, occupied/touchId routing,
+*                                  GuiPushContext()/GuiPopContext(),
+*                                  GuiBeginFrame()/GuiEndFrame() and
+*                                  GuiBeginFromRaylib()/GuiEndFromRaylib();
+*                                  pointer routing is now entirely host-side
 *                         ADDED: Internal single text editor (editId) and GuiIsEditing()
 *                         ADDED: Internal Dropdown open state, no caller-side edit flags
 *                         REDESIGNED: GuiValueBox/GuiValueBoxFloat use an internal GuiTextBox,
@@ -341,19 +353,18 @@
 *       0.8 (27-Aug-2015) Initial release. Implemented by Kevin Gato, Daniel Nicolás and Ramon Santamaria
 *
 *   DEPENDENCIES:
-*       raylib 6.1-dev  - Inputs reading (keyboard/mouse), shapes drawing, font loading and text drawing
+*       raylib 6.1-dev  - Auxiliary input macros (keyboard/wheel/middle-click), shapes drawing,
+*                        font loading and text drawing.
+*                        Pointer input is NOT read from raylib: the host fills GuiContext.
 *
 *   STANDALONE MODE:
-*       By default raygui depends on raylib mostly for the inputs and the drawing functionality but that dependency can be disabled
-*       with the config flag RAYGUI_STANDALONE. In that case is up to the user to provide another backend to cover library needs
+*       By default raygui depends on raylib mostly for the drawing functionality and a few
+*       auxiliary input macros, but that dependency can be disabled with the config flag
+*       RAYGUI_STANDALONE. Pointer input is supplied through GuiContext in both modes.
 *
 *       The following functions should be redefined for a custom backend:
 *
-*           - Vector2 GetMousePosition(void);
-*           - float GetMouseWheelMove(void);
-*           - bool IsMouseButtonDown(int button);
-*           - bool IsMouseButtonPressed(int button);
-*           - bool IsMouseButtonReleased(int button);
+*           - float GetMouseWheelMove(void);        // Only if GUI_SCROLL_DELTA is not overridden
 *           - bool IsKeyDown(int key);
 *           - bool IsKeyPressed(int key);
 *           - int GetCharPressed(void);         // -- GuiTextBox(), GuiValueBox()
@@ -452,22 +463,10 @@
 #endif
 
 #if !defined(RAYGUI_STANDALONE)
-// Macros to define required UI inputs, including mapping to gamepad controls
-#if !defined(GUI_BUTTON_DOWN)
-    #define GUI_BUTTON_DOWN         (IsMouseButtonDown(MOUSE_LEFT_BUTTON) || IsGamepadButtonDown(0, GAMEPAD_BUTTON_RIGHT_FACE_DOWN))
-#endif
-#if !defined(GUI_BUTTON_DOWN_ALT)
-    //  Mapping to alternative button down pressed
-    #define GUI_BUTTON_DOWN_ALT     (IsMouseButtonDown(MOUSE_RIGHT_BUTTON) || IsGamepadButtonDown(0, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT))
-#endif
-#if !defined(GUI_BUTTON_PRESSED)
-    #define GUI_BUTTON_PRESSED      (IsMouseButtonPressed(MOUSE_LEFT_BUTTON) || IsGamepadButtonPressed(0, GAMEPAD_BUTTON_RIGHT_FACE_DOWN))
-#endif
+// Pointer position/down/pressed/released now come from GuiContext, written by the host.
+// The remaining input macros are auxiliary: middle-click tab close and wheel scrolling.
 #if !defined(GUI_BUTTON_PRESSED_MID)
     #define GUI_BUTTON_PRESSED_MID  (IsMouseButtonPressed(MOUSE_MIDDLE_BUTTON) || IsGamepadButtonPressed(0, GAMEPAD_BUTTON_RIGHT_FACE_UP))
-#endif
-#if !defined(GUI_BUTTON_RELEASED)
-    #define GUI_BUTTON_RELEASED     (IsMouseButtonReleased(MOUSE_LEFT_BUTTON) || IsGamepadButtonReleased(0, GAMEPAD_BUTTON_RIGHT_FACE_DOWN))
 #endif
 #if !defined(GUI_SCROLL_DELTA)
     // Mapping to scroll delta changes
@@ -479,9 +478,6 @@
         #define GUI_SCROLL_DELTA    (GetMouseWheelMove() + (GetGamepadAxisMovement(0, GAMEPAD_AXIS_RIGHT_TRIGGER) + 1) - (GetGamepadAxisMovement(0, GAMEPAD_AXIS_LEFT_TRIGGER) + 1))
     #endif
 #endif
-#if !defined(GUI_POINTER_POSITION)
-    #define GUI_POINTER_POSITION    GetMousePosition()
-#endif
 #if !defined(GUI_KEY_DOWN)
     #define GUI_KEY_DOWN(key)       IsKeyDown(key)
 #endif
@@ -492,26 +488,11 @@
     #define GUI_INPUT_KEY           GetCharPressed()
 #endif
 #else
-    #if !defined(GUI_BUTTON_DOWN)
-        #define GUI_BUTTON_DOWN         0
-    #endif
-    #if !defined(GUI_BUTTON_DOWN_ALT)
-        #define GUI_BUTTON_DOWN_ALT     0
-    #endif
-    #if !defined(GUI_BUTTON_PRESSED)
-        #define GUI_BUTTON_PRESSED      0
-    #endif
     #if !defined(GUI_BUTTON_PRESSED_MID)
         #define GUI_BUTTON_PRESSED_MID  0
     #endif
-    #if !defined(GUI_BUTTON_RELEASED)
-        #define GUI_BUTTON_RELEASED     0
-    #endif
     #if !defined(GUI_SCROLL_DELTA)
         #define GUI_SCROLL_DELTA        0
-    #endif
-    #if !defined(GUI_POINTER_POSITION)
-        #define GUI_POINTER_POSITION    (Vector2){ 0 }
     #endif
     #if !defined(GUI_KEY_DOWN)
         #define GUI_KEY_DOWN(key)       0
@@ -847,25 +828,8 @@ typedef enum {
 } GuiColorPickerProperty;
 
 //----------------------------------------------------------------------------------
-// Input and context types
+// Pointer context type
 //----------------------------------------------------------------------------------
-#if !defined(RAYGUI_MAX_INPUTS)
-    #define RAYGUI_MAX_INPUTS           8       // Maximum GuiInput entries accepted by GuiBegin()
-#endif
-
-// Input snapshot injected through GuiBegin(). GuiBegin() copies the array, so the caller
-// may reuse it immediately. touchId must be unique within one frame; 0 is normally mouse.
-// A press frame should set pressed=true and down=true; a release frame should set
-// released=true and down=false. A same-frame press+release is not synthesized into a click.
-typedef struct GuiInput {
-    Vector2 position;       // Current pointer position (global coordinates)
-    bool pressed;           // Pressed this frame
-    bool released;          // Released this frame
-    bool down;              // Held down
-    int touchId;            // 0 = mouse/primary, 1..N = additional touches
-    bool occupied;          // GUI routing flag: reset by GuiBegin(), set by context routing
-} GuiInput;
-
 typedef enum {
     GUI_DRAG_NONE = 0,
     GUI_DRAG_HORIZONTAL = 1 << 0,
@@ -891,10 +855,20 @@ typedef struct GuiHitEntry {
 // controls without asking the caller to report each rectangle by hand.
 typedef void (*GuiFitSinkFn)(void *sink, Rectangle bounds);
 
-// Isolated interaction context. Zero-initialize before first use and keep it alive while
-// used; do not copy/move it after GuiPushContext() because internal pointers target it.
-// Single-context UIs do not need a GuiContext (the library owns a default one).
+// One GuiContext is one pointer. Zero-initialize before first use and keep it alive while
+// used. The host writes the pointer* input fields every frame before GuiBegin(), and reads
+// pointerCaptured after GuiEnd(). All other fields are raygui-internal state.
+// Single-pointer UIs can pass NULL to GuiBegin() and use the library-owned default context.
 typedef struct GuiContext {
+    // Host-owned input for this pointer (write before GuiBegin())
+    Vector2 pointerPosition;        // Current pointer position (global coordinates)
+    bool pointerPressed;            // Pressed this frame (with pointerDown = true)
+    bool pointerReleased;           // Released this frame (with pointerDown = false)
+    bool pointerDown;               // Held down
+
+    // Raygui-owned output (valid after GuiEnd())
+    bool pointerCaptured;           // True if a control held this pointer this frame
+
     // Capture ownership
     unsigned int capturedId;        // Confirmed owner
     unsigned int tentativeId;       // Press frame candidate (topmost hit)
@@ -947,12 +921,7 @@ typedef struct GuiContext {
     unsigned int scopeId;
     int scopeDepth;
 
-    // Input routed to this context (index into the frame input array)
-    int inputIndex;                 // -1 = no input bound
-    bool hasTouch;                  // This context currently owns inputIndex
-
     // Internal frame bookkeeping
-    struct GuiContext *nextFrameContext;
     bool inFrame;
 
     // Layout measurement sink (host-owned, optional). While fitReport != NULL every control
@@ -1009,32 +978,22 @@ RAYGUIAPI void GuiSetScissor(Rectangle rect);                   // Clip mouse in
 // topmost hit control becomes the tentative owner; after the drag threshold the direction
 // arbitration confirms the final owner. Only that control can interact until release.
 //
-// Every frame must be opened and closed with one of these pairs:
-//   GuiBegin(inputs, count) / GuiEnd()              explicit GuiInput snapshot
-//   GuiBeginFromRaylib()    / GuiEndFromRaylib()    raylib mouse + touch adapter
-//   GuiBeginFrame()         / GuiEndFrame()         GUI_POINTER_* / GUI_BUTTON_* macros
-// The pairs must not be mixed inside one frame.
+// Every frame must be opened and closed with GuiBegin()/GuiEnd(). The host writes the
+// ctx->pointer* input fields before GuiBegin(); raygui writes ctx->pointerCaptured in
+// GuiEnd(). GuiBegin(NULL) selects a library-owned default context.
 //
-// Layered UI: open ONE frame for the whole layer stack and draw layers from bottom to top.
-// Do not start/end a frame per window or per layer: the topmost drawn control already wins
-// the hit stack, and modal controls block the layers below. GuiPushContext() is for
-// disjoint touch regions, not for overlapping layers (routing is first-claim, not z-order).
-// To block a background layer while a popup is open, call GuiLock() before drawing the
-// background and GuiUnlock() before drawing the popup (or draw a fullscreen blocker).
-RAYGUIAPI void GuiBegin(GuiInput *inputs, int inputCount);      // Start a frame; inputs stay caller-owned until GuiEnd()
-RAYGUIAPI void GuiEnd(void);                                    // End the frame and resolve capture/hover for all contexts
-RAYGUIAPI void GuiBeginFrame(void);                             // Start a frame from the configured GUI_* input macros
-RAYGUIAPI void GuiEndFrame(void);                               // End a frame started with GuiBeginFrame()
-RAYGUIAPI void GuiBeginFromRaylib(void);                        // Start a frame from raylib mouse/touch input
-RAYGUIAPI void GuiEndFromRaylib(void);                          // End a frame started with GuiBeginFromRaylib()
+// One GuiContext is one pointer. For multiple pointers (or disjoint UI regions) keep one
+// caller-owned context per pointer and run one Begin/End pass per pointer; the host decides
+// which pointer goes to which pass and what to do with pointerCaptured afterwards.
+// raygui never reads an input array and never calls raylib input functions.
+//
+// Layered UI: draw the whole layer stack inside ONE pass, bottom to top. The topmost drawn
+// control already wins the hit stack and modal controls block the layers below. To block a
+// background layer while a popup is open, call GuiLock() before drawing the background and
+// GuiUnlock() before drawing the popup (or draw a fullscreen blocker).
+RAYGUIAPI void GuiBegin(GuiContext *ctx);                       // Start a frame for one pointer; ctx==NULL uses the default context
+RAYGUIAPI void GuiEnd(void);                                    // End the frame; writes ctx->pointerCaptured
 
-// Multiple independent UI regions (for example a left joystick and right buttons).
-// A context is caller-owned and persists across frames: zero-initialize it once, then
-// push/pop it every frame while it is visible. Contexts are siblings, never nested.
-// GuiPushContext() binds ctx to the first input that is not occupied; that input stays
-// with the context until released. Contexts are siblings, never nested.
-RAYGUIAPI void GuiPushContext(GuiContext *ctx);                 // Enter ctx and bind its input by index
-RAYGUIAPI void GuiPopContext(void);                             // Leave the current context (returns to default)
 RAYGUIAPI void GuiCancel(GuiContext *ctx);                      // ctx==NULL: current; silent clear, no results
 RAYGUIAPI void GuiReleaseCapture(GuiContext *ctx);              // ctx==NULL: current; drop capture only
 RAYGUIAPI void GuiSetDragThreshold(float threshold);            // Set global drag threshold in pixels (default 5)
@@ -1768,16 +1727,12 @@ static unsigned int guiIconFontOffsetY = 0;     // Gui icon font atlas offset (i
 
 static Rectangle scissorRectangle = { 0 };
 
-// Control capture state (one context per independent UI region)
+// Control capture state (one context per pointer; caller-owned or default)
 static GuiContext guiDefaultContext = { 0 };
 static GuiContext *guiCurrentContext = &guiDefaultContext;
 #define guiCapture (*guiCurrentContext)
 
-static GuiInput *guiFrameInputs = NULL;              // Inputs injected for this frame (caller-owned)
-static int guiFrameInputCount = 0;
-static GuiInput guiEmptyInput = { { -1000000.0f, -1000000.0f }, false, false, false, 0, false }; // Fallback when a context has no bound input
 static bool guiFrameInProgress = false;
-static GuiContext *guiFrameContextList = NULL;       // Contexts drawn this frame
 static float guiDragThreshold = 5.0f;
 
 static bool guiTooltip = false;                 // Tooltip enabled/disabled
@@ -1827,12 +1782,9 @@ static bool guiStyleLoaded = false;         // Style loaded flag for lazy style 
 #define MOUSE_LEFT_BUTTON     0
 
 // Input required functions
+// NOTE: Pointer input is supplied through GuiContext; no mouse functions needed here.
 //-------------------------------------------------------------------------------
-static Vector2 GetMousePosition(void);
-static float GetMouseWheelMove(void);
-static bool IsMouseButtonDown(int button);
-static bool IsMouseButtonPressed(int button);
-static bool IsMouseButtonReleased(int button);
+static float GetMouseWheelMove(void);   // Only when GUI_SCROLL_DELTA is left to its default
 
 static bool IsKeyDown(int key);
 static bool IsKeyPressed(int key);
@@ -1990,11 +1942,9 @@ int GuiGetStyle(int control, int property)
 
 //----------------------------------------------------------------------------------
 // Control capture helpers
-// NOTE: Controls read the pointer snapshot taken at GuiBegin(), register hits while drawing
-// and only run interaction side effects when their automatic id owns the capture.
+// NOTE: Controls read the pointer fields written by the host at GuiBegin(), register hits
+// while drawing and only run interaction side effects when their id owns the capture.
 //----------------------------------------------------------------------------------
-static GuiInput *GuiContextInput(GuiContext *ctx);
-
 // Report the bounds handed to a control to the bound layout sink (no-op when unbound).
 // Must be the FIRST statement of a control: controls rewrite `bounds` internally, so a
 // later call would report the control's inner box instead of the area it was given.
@@ -2003,15 +1953,15 @@ static void GuiFitReport(Rectangle bounds)
     if (guiCapture.fitReport != NULL) guiCapture.fitReport(guiCapture.fitSink, bounds);
 }
 
-static Vector2 GuiPointerPosition(void) { return GuiContextInput(guiCurrentContext)->position; }
-static bool GuiIsPointerDown(void) { return GuiContextInput(guiCurrentContext)->down; }
-static bool GuiIsPointerPressed(void) { return GuiContextInput(guiCurrentContext)->pressed; }
-static bool GuiIsPointerReleased(void) { return GuiContextInput(guiCurrentContext)->released; }
+static Vector2 GuiPointerPosition(void) { return guiCapture.pointerPosition; }
+static bool GuiIsPointerDown(void) { return guiCapture.pointerDown; }
+static bool GuiIsPointerPressed(void) { return guiCapture.pointerPressed; }
+static bool GuiIsPointerReleased(void) { return guiCapture.pointerReleased; }
 
 // Check if the pointer is inside the given bounds (respecting the scissor rectangle)
 static bool GuiHitTest(Rectangle bounds)
 {
-    return CheckScissorCollisionPointRec(GuiContextInput(guiCurrentContext)->position, bounds);
+    return CheckScissorCollisionPointRec(guiCapture.pointerPosition, bounds);
 }
 
 // Register a hit entry in the current frame hit stack
@@ -2118,15 +2068,15 @@ static bool GuiHitControl(void)
     if (GuiIsModal()) return true;
 
     // Press frame only registers capture candidates, no side effects
-    if (GuiContextInput(guiCurrentContext)->pressed) return false;
+    if (guiCapture.pointerPressed) return false;
 
-    if (GuiContextInput(guiCurrentContext)->down)
+    if (guiCapture.pointerDown)
     {
         if (!guiCapture.isConfirmed) return false;    // Drag threshold not reached yet
         return (id == guiCapture.capturedId);
     }
 
-    if (GuiContextInput(guiCurrentContext)->released)
+    if (guiCapture.pointerReleased)
     {
         if (!guiCapture.isConfirmed) return false;
         if (id != guiCapture.capturedId) return false;
@@ -2150,7 +2100,7 @@ static bool GuiCanInteract(void)
     if (id == 0) return false;
     if (guiLocked) return false;
     if (GuiIsModal()) return true;
-    if (GuiContextInput(guiCurrentContext)->pressed) return false;
+    if (guiCapture.pointerPressed) return false;
     if (!guiCapture.isConfirmed) return false;
 
     return (id == guiCapture.capturedId);
@@ -2203,69 +2153,12 @@ static void GuiResetContextState(GuiContext *ctx)
     ctx->commitText[0] = '\0';
     ctx->editTextIsValueBox = false;
     ctx->commitTextValid = false;
-    ctx->inputIndex = -1;
-    ctx->hasTouch = false;
-}
-
-// Get the input bound to a context (empty input when none)
-static GuiInput *GuiContextInput(GuiContext *ctx)
-{
-    if ((ctx->inputIndex >= 0) && (ctx->inputIndex < guiFrameInputCount)) return &guiFrameInputs[ctx->inputIndex];
-    return &guiEmptyInput;
-}
-
-// Bind the first available input to a pushed context.
-// A context that already owns a held input keeps it; otherwise prefer a pressed/held
-// free input, then fall back to any free input (hover). Occupation is decided by Pop.
-static void GuiSelectContextInput(GuiContext *ctx)
-{
-    if (ctx->hasTouch)
-    {
-        if ((ctx->inputIndex >= 0) && (ctx->inputIndex < guiFrameInputCount))
-        {
-            // Continuing an existing touch: reserve it for this context while it is held
-            if (!guiFrameInputs[ctx->inputIndex].released) guiFrameInputs[ctx->inputIndex].occupied = true;
-            return;
-        }
-
-        // The bound input disappeared: drop the binding instead of stealing a new touch
-        ctx->inputIndex = -1;
-        ctx->hasTouch = false;
-        return;
-    }
-
-    ctx->inputIndex = -1;
-
-    // First pass: a free input that is actually pressed/held
-    for (int i = 0; i < guiFrameInputCount; i++)
-    {
-        if (guiFrameInputs[i].occupied) continue;
-        if (!guiFrameInputs[i].pressed && !guiFrameInputs[i].down) continue;
-
-        ctx->inputIndex = i;
-        return;
-    }
-
-    // Second pass: idle input, used for hover
-    for (int i = 0; i < guiFrameInputCount; i++)
-    {
-        if (guiFrameInputs[i].occupied) continue;
-
-        ctx->inputIndex = i;
-        return;
-    }
-}
-
-// Default single-context routing: only the first input is used
-static void GuiSelectDefaultInput(GuiContext *ctx)
-{
-    ctx->inputIndex = (guiFrameInputCount > 0)? 0 : -1;
+    ctx->pointerCaptured = false;
 }
 
 // Rebuild a context for the current frame and run the press/release/arbitration state machine
 static void GuiPrepareContext(GuiContext *ctx)
 {
-    GuiInput *input = GuiContextInput(ctx);
     unsigned int previousFrame = ctx->frameCounter;
     bool wasDragActive = ctx->dragActive;
 
@@ -2300,18 +2193,18 @@ static void GuiPrepareContext(GuiContext *ctx)
     ctx->dragDelta = RAYGUI_CLITERAL(Vector2){ 0.0f, 0.0f };
     if (ctx->hasPointerHistory)
     {
-        ctx->dragDelta.x = input->position.x - ctx->lastPointerPosition.x;
-        ctx->dragDelta.y = input->position.y - ctx->lastPointerPosition.y;
+        ctx->dragDelta.x = ctx->pointerPosition.x - ctx->lastPointerPosition.x;
+        ctx->dragDelta.y = ctx->pointerPosition.y - ctx->lastPointerPosition.y;
     }
 
-    ctx->lastPointerPosition = input->position;
+    ctx->lastPointerPosition = ctx->pointerPosition;
     ctx->hasPointerHistory = true;
 
     ctx->hoverId = (ctx->capturedId != 0)? ctx->capturedId : ctx->hoverIdNext;
 
-    if (input->pressed)
+    if (ctx->pointerPressed)
     {
-        ctx->startPos = input->position;
+        ctx->startPos = ctx->pointerPosition;
         ctx->tentativeId = ctx->editId;
         ctx->capturedId = 0;
         ctx->isConfirmed = false;
@@ -2319,7 +2212,7 @@ static void GuiPrepareContext(GuiContext *ctx)
         ctx->dragDirection = GUI_DRAG_NONE;
         ctx->pressHitStackCount = 0;
     }
-    else if (input->released)
+    else if (ctx->pointerReleased)
     {
         // Release before the drag threshold: the topmost hit becomes a click
         if (!ctx->isConfirmed)
@@ -2328,15 +2221,15 @@ static void GuiPrepareContext(GuiContext *ctx)
             ctx->isConfirmed = true;
         }
     }
-    else if (input->down && (ctx->tentativeId != 0) && !ctx->isConfirmed)
+    else if (ctx->pointerDown && (ctx->tentativeId != 0) && !ctx->isConfirmed)
     {
         // Modal controls keep the capture regardless of movement; a pending text commit
         // (outside press) also blocks direction arbitration until release
         if (((ctx->editId != 0) && (ctx->tentativeId == ctx->editId)) ||
             (ctx->commitId != 0)) return;
 
-        float dx = input->position.x - ctx->startPos.x;
-        float dy = input->position.y - ctx->startPos.y;
+        float dx = ctx->pointerPosition.x - ctx->startPos.x;
+        float dy = ctx->pointerPosition.y - ctx->startPos.y;
 
         if ((dx*dx + dy*dy) >= (guiDragThreshold*guiDragThreshold))
         {
@@ -2362,7 +2255,7 @@ static void GuiPrepareContext(GuiContext *ctx)
             ctx->isConfirmed = true;
         }
     }
-    else if (!input->down)
+    else if (!ctx->pointerDown)
     {
         ctx->capturedId = 0;
         ctx->tentativeId = 0;
@@ -2374,14 +2267,14 @@ static void GuiPrepareContext(GuiContext *ctx)
     }
 
     // A drag is active only after arbitration confirmed an owner and the pointer is still held
-    ctx->dragActive = ctx->isConfirmed && input->down && ctx->didDrag;
+    ctx->dragActive = ctx->isConfirmed && ctx->pointerDown && ctx->didDrag;
 
     // On the first active frame include the movement spent before the threshold, so the
     // content follows the whole gesture instead of losing the first few pixels.
     if (ctx->dragActive && !wasDragActive)
     {
-        ctx->dragDelta.x = input->position.x - ctx->startPos.x;
-        ctx->dragDelta.y = input->position.y - ctx->startPos.y;
+        ctx->dragDelta.x = ctx->pointerPosition.x - ctx->startPos.x;
+        ctx->dragDelta.y = ctx->pointerPosition.y - ctx->startPos.y;
     }
 }
 
@@ -2390,9 +2283,7 @@ static void GuiFinalizeContext(GuiContext *ctx)
 {
     if (!ctx->inFrame) return;
 
-    GuiInput *input = GuiContextInput(ctx);
-
-    if (input->pressed)
+    if (ctx->pointerPressed)
     {
         ctx->pressHitStackCount = ctx->hitStackCount;
         for (int i = 0; i < ctx->hitStackCount; i++) ctx->pressHitStack[i] = ctx->hitStack[i];
@@ -2413,30 +2304,18 @@ static void GuiFinalizeContext(GuiContext *ctx)
     else if (ctx->hitStackCount > 0) ctx->hoverIdNext = ctx->hitStack[ctx->hitStackCount - 1].id;
     else ctx->hoverIdNext = 0;
 
-    // A released/missing touch stops being held by this context
-    if (!input->down && !input->pressed) ctx->hasTouch = false;
+    // Report ownership back to the host. tentativeId is set on the press frame, capturedId
+    // on confirmed drag/release frames; either one means the UI consumed this pointer.
+    ctx->pointerCaptured = (ctx->capturedId != 0) || (ctx->tentativeId != 0);
 
     ctx->inFrame = false;
     ctx->currentId = 0;
     ctx->scopeDepth = 0;
 }
 
-static void GuiAddFrameContext(GuiContext *ctx)
-{
-    // A context can be pushed more than once per frame (push/pop/push): keep one list entry
-    for (GuiContext *it = guiFrameContextList; it != NULL; it = it->nextFrameContext)
-    {
-        if (it == ctx) return;
-    }
-
-    ctx->nextFrameContext = guiFrameContextList;
-    guiFrameContextList = ctx;
-}
-
-// Start a frame with explicit inputs
-// NOTE: inputs[] is owned by the caller and must stay valid until GuiEnd(). Its occupied
-// flags are reset here. The default context uses only inputs[0].
-void GuiBegin(GuiInput *inputs, int inputCount)
+// Start a frame for one pointer. The host owns ctx (NULL selects the built-in default).
+// Its pointer* fields must already contain this frame's input snapshot.
+void GuiBegin(GuiContext *ctx)
 {
     if (guiFrameInProgress)
     {
@@ -2444,98 +2323,12 @@ void GuiBegin(GuiInput *inputs, int inputCount)
         GuiEnd();
     }
 
-    guiFrameInputs = inputs;
-    guiFrameInputCount = 0;
-
-    if (inputs != NULL)
-    {
-        if (inputCount > RAYGUI_MAX_INPUTS) inputCount = RAYGUI_MAX_INPUTS;
-        if (inputCount < 0) inputCount = 0;
-
-        for (int i = 0; i < inputCount; i++) inputs[i].occupied = false;
-        guiFrameInputCount = inputCount;
-    }
-
-    guiFrameContextList = NULL;
+    guiCurrentContext = (ctx != NULL)? ctx : &guiDefaultContext;
     guiFrameInProgress = true;
-
-    guiCurrentContext = &guiDefaultContext;
-    GuiSelectDefaultInput(&guiDefaultContext);
-    GuiPrepareContext(&guiDefaultContext);
-    GuiAddFrameContext(&guiDefaultContext);
+    GuiPrepareContext(guiCurrentContext);
 }
 
-// Enter an isolated context; contexts are siblings, nesting is not allowed
-// The context takes the first input that is not occupied. It keeps that input while held;
-// GuiPopContext() marks it occupied or releases it on the release frame.
-void GuiPushContext(GuiContext *ctx)
-{
-    if (!guiFrameInProgress)
-    {
-        RAYGUI_LOG("WARNING: GuiPushContext() called outside GuiBegin()/GuiEnd()\n");
-        return;
-    }
-
-    if (guiCurrentContext != &guiDefaultContext)
-    {
-        RAYGUI_LOG("WARNING: GuiPushContext() cannot be nested\n");
-        return;
-    }
-
-    if (ctx == NULL)
-    {
-        RAYGUI_LOG("WARNING: GuiPushContext() received NULL context\n");
-        return;
-    }
-
-    guiCurrentContext = ctx;
-    GuiSelectContextInput(ctx);
-
-    // Per-context stamp: inFrame is cleared by GuiFinalizeContext() when its
-    // owning VM called GuiEnd(), so it reliably tells us "not prepared yet this
-    // frame". No global counter to compare against any more.
-    if (!ctx->inFrame)
-    {
-        GuiPrepareContext(ctx);
-        GuiAddFrameContext(ctx);
-    }
-}
-
-// Leave the current context and return to the default one
-// The bound input is marked occupied while held; on its release frame it is handed back.
-void GuiPopContext(void)
-{
-    GuiContext *ctx = guiCurrentContext;
-
-    if (ctx == &guiDefaultContext)
-    {
-        RAYGUI_LOG("WARNING: GuiPopContext() called without a matching GuiPushContext()\n");
-        return;
-    }
-
-    if ((ctx->inputIndex >= 0) && (ctx->inputIndex < guiFrameInputCount))
-    {
-        GuiInput *input = &guiFrameInputs[ctx->inputIndex];
-
-        input->occupied = !input->released;
-
-        if (input->released)
-        {
-            ctx->hasTouch = false;
-            ctx->inputIndex = -1;
-        }
-        else ctx->hasTouch = true;
-    }
-    else
-    {
-        ctx->hasTouch = false;
-        ctx->inputIndex = -1;
-    }
-
-    guiCurrentContext = &guiDefaultContext;
-}
-
-// End the current frame and resolve capture/hover for every context drawn this frame
+// End the current frame. Writes ctx->pointerCaptured for the host to inspect.
 void GuiEnd(void)
 {
     if (!guiFrameInProgress)
@@ -2544,150 +2337,9 @@ void GuiEnd(void)
         return;
     }
 
-    for (GuiContext *ctx = guiFrameContextList; ctx != NULL; ctx = ctx->nextFrameContext)
-        GuiFinalizeContext(ctx);
-
-    guiFrameContextList = NULL;
+    GuiFinalizeContext(guiCurrentContext);
     guiFrameInProgress = false;
-    guiFrameInputs = NULL;
-    guiFrameInputCount = 0;
     guiCurrentContext = &guiDefaultContext;
-}
-
-// Start a frame from GUI_POINTER_POSITION / GUI_BUTTON_* backend macros
-void GuiBeginFrame(void)
-{
-    static GuiInput input;
-    input.position = GUI_POINTER_POSITION;
-    input.pressed = (GUI_BUTTON_PRESSED)? true : false;
-    input.released = (GUI_BUTTON_RELEASED)? true : false;
-    input.down = (GUI_BUTTON_DOWN)? true : false;
-    input.touchId = 0;
-    input.occupied = false;
-
-    GuiBegin(&input, 1);
-}
-
-// End a frame started with GuiBeginFrame()
-void GuiEndFrame(void)
-{
-    GuiEnd();
-}
-
-// Start a frame from raylib mouse/touch input
-void GuiBeginFromRaylib(void)
-{
-    static GuiInput inputs[RAYGUI_MAX_INPUTS];
-    int count = 0;
-
-#if !defined(RAYGUI_STANDALONE)
-    static struct {
-        int id;
-        bool down;
-        Vector2 position;
-    } previousTouches[RAYGUI_MAX_INPUTS] = { 0 };
-    static int previousTouchCount = 0;
-
-    int touchCount = GetTouchPointCount();
-
-    if (touchCount > 0)
-    {
-        if (touchCount > RAYGUI_MAX_INPUTS) touchCount = RAYGUI_MAX_INPUTS;
-
-        for (int i = 0; i < touchCount; i++)
-        {
-            int id = GetTouchPointId(i);
-            Vector2 position = GetTouchPosition(i);
-            bool wasDown = false;
-
-            for (int j = 0; j < previousTouchCount; j++)
-            {
-                if (previousTouches[j].id == id)
-                {
-                    wasDown = previousTouches[j].down;
-                    previousTouches[j].down = true;
-                    previousTouches[j].position = position;
-                    break;
-                }
-            }
-
-            inputs[count].position = position;
-            inputs[count].down = true;
-            inputs[count].pressed = !wasDown;
-            inputs[count].released = false;
-            inputs[count].touchId = id;
-            count++;
-        }
-
-        // Touches that disappeared this frame produce their release event
-        for (int j = 0; j < previousTouchCount; j++)
-        {
-            bool stillDown = false;
-            for (int i = 0; i < touchCount; i++)
-            {
-                if (GetTouchPointId(i) == previousTouches[j].id) { stillDown = true; break; }
-            }
-
-            if (!stillDown && previousTouches[j].down && (count < RAYGUI_MAX_INPUTS))
-            {
-                inputs[count].position = previousTouches[j].position;
-                inputs[count].down = false;
-                inputs[count].pressed = false;
-                inputs[count].released = true;
-                inputs[count].touchId = previousTouches[j].id;
-                count++;
-                previousTouches[j].down = false;
-            }
-        }
-
-        previousTouchCount = touchCount;
-        for (int i = 0; i < touchCount; i++)
-        {
-            previousTouches[i].id = GetTouchPointId(i);
-            previousTouches[i].position = GetTouchPosition(i);
-        }
-    }
-    else if (previousTouchCount > 0)
-    {
-        // All touches ended this frame: emit release events for them
-        for (int j = 0; (j < previousTouchCount) && (count < RAYGUI_MAX_INPUTS); j++)
-        {
-            if (!previousTouches[j].down) continue;
-
-            inputs[count].position = previousTouches[j].position;
-            inputs[count].down = false;
-            inputs[count].pressed = false;
-            inputs[count].released = true;
-            inputs[count].touchId = previousTouches[j].id;
-            count++;
-            previousTouches[j].down = false;
-        }
-
-        previousTouchCount = 0;
-    }
-    else
-#endif
-    {
-        // Mouse is touch 0 when no touch points are active
-        inputs[0].position = GetMousePosition();
-        inputs[0].pressed = IsMouseButtonPressed(0);
-        inputs[0].released = IsMouseButtonReleased(0);
-        inputs[0].down = IsMouseButtonDown(0);
-        inputs[0].touchId = 0;
-        count = 1;
-
-#if !defined(RAYGUI_STANDALONE)
-        previousTouchCount = 0;
-#endif
-    }
-
-    GuiBegin(inputs, count);
-}
-
-// End a frame started with GuiBeginFromRaylib()
-void GuiEndFromRaylib(void)
-{
-    GuiEnd();
 }
 
 // Cancel every interaction in a context without triggering any control
@@ -2699,14 +2351,12 @@ void GuiCancel(GuiContext *ctx)
     if (ctx == NULL) ctx = guiCurrentContext;
 
     GuiResetContextState(ctx);
-    ctx->hasTouch = false;
-    ctx->inputIndex = -1;
     ctx->inFrame = false;
 }
 
 // Release the capture without triggering the captured control
-// ctx == NULL targets the current context. Text edit / dropdown / touch routing state is
-// preserved; only capture ownership is dropped.
+// ctx == NULL targets the current context. Text edit / dropdown state is preserved;
+// only capture ownership is dropped. guiCapture.pointerCaptured is not changed here.
 void GuiReleaseCapture(GuiContext *ctx)
 {
     if (ctx == NULL) ctx = guiCurrentContext;
@@ -5648,9 +5298,8 @@ void GuiSetScissor(Rectangle rect)
 //----------------------------------------------------------------------------------
 // Control capture functions
 //----------------------------------------------------------------------------------
-// NOTE: Frame/context functions (GuiBegin/GuiEnd, GuiPushContext/GuiPopContext,
-// GuiCancel, GuiReleaseCapture, ...) are defined before the controls; capture ids are
-// assigned automatically in draw order.
+// NOTE: Frame/context functions (GuiBegin/GuiEnd, GuiCancel, GuiReleaseCapture, ...)
+// are defined before the controls; capture ids are assigned automatically in draw order.
 
 //----------------------------------------------------------------------------------
 // Tooltip management functions

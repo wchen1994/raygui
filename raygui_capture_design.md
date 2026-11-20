@@ -1,5 +1,14 @@
 # raygui CONTROL CAPTURE 设计文档
 
+> **输入层重构（2026-11-20，优先于下文第二阶段设计）**
+> - 删除 `GuiInput[]`、`occupied`/`touchId` 路由、`GuiPushContext()`/`GuiPopContext()`、
+>   `GuiBeginFromRaylib()`/`GuiEndFromRaylib()`、`GuiBeginFrame()`/`GuiEndFrame()`。
+> - 唯一帧入口：`GuiBegin(GuiContext *)` / `GuiEnd()`。一个 `GuiContext` 对应一个 pointer；
+>   宿主每帧写入 `pointerPosition/pointerPressed/pointerReleased/pointerDown`，
+>   `GuiEnd()` 在 `ctx->pointerCaptured` 写回该 pointer 是否被 UI 持有。
+> - 多指/多区域由宿主建多个 context、各自跑 Begin/End；raygui 不再读 raylib 输入 API。
+> - 第 3.2～3.5 节描述的输入抽象与路由已作废；两阶段捕获、ID、仲裁等第一阶段机制不变。
+
 > **落地状态（2026-10-31）**
 > - 阶段一 + 阶段二均已落地：自动 ID、hitStack、两阶段 capture、方向仲裁、hover、模态拦截、
 >   每个 context 每帧一个离散触发、内部单编辑焦点（`editId`），以及 `GuiInput` 注入、

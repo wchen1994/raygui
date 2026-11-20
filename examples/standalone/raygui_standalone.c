@@ -27,22 +27,23 @@ int main()
     
     // TODO: Create your game loop
     {
-        // Build this frame's input explicitly; a custom backend can feed any source
-        GuiInput input = {
-            GetMousePosition(),
-            IsMouseButtonPressed(0),
-            IsMouseButtonReleased(0),
-            IsMouseButtonDown(0),
-            0,
-            false
-        };
+        // One context is one pointer; keep it alive across frames. The host decides
+        // which pointer goes to it and where the pointer state comes from.
+        static GuiContext guiContext = { 0 };
+        guiContext.pointerPosition = GetMousePosition();
+        guiContext.pointerPressed = IsMouseButtonPressed(MOUSE_LEFT_BUTTON);
+        guiContext.pointerReleased = IsMouseButtonReleased(MOUSE_LEFT_BUTTON);
+        guiContext.pointerDown = IsMouseButtonDown(MOUSE_LEFT_BUTTON);
 
         // Start a gui frame (automatic ids and capture state are rebuilt every frame)
-        GuiBegin(&input, 1);
+        GuiBegin(&guiContext);
 
         // TODO: Use raygui API
 
         GuiEnd();
+
+        // GuiEnd writes back whether a control held this pointer
+        if (guiContext.pointerCaptured) { /* TODO: keep pointer away from game input */ }
     }
     
     // TODO: De-initialize all resources

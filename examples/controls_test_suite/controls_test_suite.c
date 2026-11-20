@@ -43,6 +43,9 @@
 //#define RAYGUI_CUSTOM_ICONS     // It requires providing gui_icons.h in the same directory
 //#include "gui_icons.h"          // External icons data provided, it can be generated with rGuiIcons tool
 #include "../../src/raygui.h"
+#include "../raygui_host_input.h"
+
+static GuiContext guiContext = { 0 };
 
 // raygui embedded styles
 #include "../styles/style_cyber.h"             // raygui style: cyber
@@ -227,7 +230,7 @@ int main()
 
             ClearBackground(GetColor(GuiGetStyle(DEFAULT, BACKGROUND_COLOR)));
 
-            GuiBeginFromRaylib();
+            GuiHostBeginMouse(&guiContext);
 
             // raygui: controls drawing
             //----------------------------------------------------------------------------------
@@ -354,7 +357,7 @@ int main()
                 }
             }
 
-            GuiEndFromRaylib();
+            GuiEnd();
             //----------------------------------------------------------------------------------
 
         EndDrawing();

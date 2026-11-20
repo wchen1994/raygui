@@ -1,8 +1,40 @@
 # raygui 控件捕获（阶段一 + 阶段二实现说明）
 
-> 状态：阶段一、阶段二实现完成，`tests/capture_core_test.c` 通过。
-> 日期：2026-10-30
+> 状态：阶段一、阶段二实现完成；2026-11-20 输入层重构为「单指针 Context」。
+> 日期：2026-10-30（输入层重构：2026-11-20）
 > 版本：raygui 5.1-dev
+
+## 0. 最新输入层契约（覆盖下文的旧 API 描述）
+
+pointer 路由已从 raygui 移到宿主工程。下文涉及 `GuiInput[]`、`occupied`、`touchId`、
+`GuiPushContext()/GuiPopContext()`、`GuiBeginFromRaylib()`、`GuiBeginFrame()` 的章节均为历史实现记录，
+不再适用于当前代码。
+
+当前只有一个帧入口对：
+
+```c
+GuiContext gui = { 0 };   // 调用方拥有，一个 context 对应一个 pointer，跨帧保留
+
+// 每帧由宿主写入输入
+gui.pointerPosition = hostPointer.position;
+gui.pointerPressed = hostPointer.pressed;
+gui.pointerReleased = hostPointer.released;
+gui.pointerDown = hostPointer.down;
+
+GuiBegin(&gui);           // NULL 使用库内默认 context
+... 绘制控件 ...
+GuiEnd();                 // 在 gui.pointerCaptured 写回：该 pointer 是否被 UI 持有
+```
+
+要点：
+
+- raygui 不读取输入数组、不分配 touch id、不调用 raylib 输入 API；输入设备读取与多指分流全在宿主。
+- 多指/多 UI 区域：每个 pointer 一个 `GuiContext`，宿主按自己的规则跑多次 `GuiBegin/GuiEnd`，
+  每次绘制该 pointer 可达的 UI；`pointerCaptured` 告诉宿主是否要把该 pointer 交给游戏逻辑。
+- `pointerCaptured` 在 press 命中控件、确认拖拽、release 帧为 true；空闲帧为 false。
+  编辑中的 TextBox / 展开的 Dropdown 会吃掉外部点击，对应帧也会报 true。
+- `GuiCancel(ctx)` 会把 `pointerCaptured` 一并清零；`GuiReleaseCapture(ctx)` 只丢掉捕获归属。
+- 捕获状态机本身（自动 ID、命中栈、阈值、方向仲裁、hover、模态拦截）保持不变，仍适用下文。
 
 ## 1. 目标
 

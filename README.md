@@ -12,7 +12,7 @@
 
 **WARNING: Latest `raygui` from master branch is always aligned with latest `raylib` from master branch and all raylibtech tools. Make sure to use the latest versions.**
 
-**WARNING: Latest `raygui 5.1` introduces API-BREAKING changes: automatic control capture (manual capture ids removed) and internal text editing (the `editMode` parameter was removed from text controls). A UI frame must be wrapped in `GuiBeginFromRaylib()`/`GuiEndFromRaylib()`.**
+**WARNING: Latest `raygui 5.1` introduces API-BREAKING changes: automatic control capture (manual capture ids removed), internal text editing (the `editMode` parameter was removed from text controls), and host-owned pointer input (`GuiBegin(&ctx)`/`GuiEnd()` with one `GuiContext` per pointer; `ctx.pointerCaptured` is written back at frame end).**
 
 *NOTE: raygui is a single-file header-only library (despite its internal dependency on raylib), so, functions definition AND implementation reside in the same file `raygui.h`, when including `raygui.h` in a module, `RAYGUI_IMPLEMENTATION` must be previously defined to include the implementation part of `raygui.h` BUT only in one compilation unit, other modules could also include `raygui.h` but `RAYGUI_IMPLEMENTATION` must not be defined again.*
 
@@ -88,55 +88,37 @@ ListView    |  ColorPicker |  MessageBox  |  TextInputBox
 
 Controls are assigned an id automatically in draw order. Every control under the pointer registers in a per-frame hit stack, so overlapping controls (floating panels, popups, scrollable content) resolve a single owner instead of interacting at the same time.
 
-A frame must be started and closed explicitly:
+Pointer routing belongs to the host. One `GuiContext` is one pointer: fill its `pointer*` input fields, run the frame, then read the `pointerCaptured` output:
 
 ```c
-GuiBeginFromRaylib();
+static GuiContext gui = { 0 };   // caller-owned, one per pointer
 
+gui.pointerPosition = myPointer.position;
+gui.pointerPressed = myPointer.pressed;
+gui.pointerReleased = myPointer.released;
+gui.pointerDown = myPointer.down;
+
+GuiBegin(&gui);
 if (GuiButton(saveRec, "Save")) save();   // result is returned on release
 GuiScrollPanel(panelRec, NULL, contentRec, &scroll, &view);
-
-GuiEndFromRaylib();
-```
-
-For a custom backend, inject inputs directly instead of reading raylib:
-
-```c
-GuiInput inputs[2] = {
-    { { 20, 40 }, true, false, true, 0 },   // position, pressed, released, down, touchId
-    { { 240, 40 }, false, false, true, 1 }
-};
-
-GuiBegin(inputs, 2);
-// ... draw UI ...
 GuiEnd();
+
+if (gui.pointerCaptured) { ... }   // UI held this pointer; don't forward it to the game
 ```
 
-Independent UI regions (for example a left joystick and right buttons) use sibling contexts. Each context takes the first input whose `occupied` flag is false. Start with `GuiBegin(inputs, count)`, then push/pop in order:
+`GuiBegin(NULL)` uses a library-owned default context. For multiple pointers (or disjoint UI regions), keep one caller-owned context per pointer and run one Begin/End pass per pointer. raygui never reads an input array, never assigns touch ids and never calls raylib input functions. See `examples/raygui_host_input.h` for a minimal raylib adapter.
 
-```c
-GuiPushContext(&leftContext);
-DrawLeftUI();
-GuiPopContext();
-
-GuiPushContext(&rightContext);
-DrawRightUI();
-GuiPopContext();
-```
-
-`GuiBegin()` clears the `occupied` flags; `GuiPopContext()` marks the bound input occupied while it is held, and releases it on the input's release frame. The `inputs[]` array belongs to the caller and must stay valid until `GuiEnd()`.
-
-Contexts are flat (no nesting) and keep their `inputIndex` across frames. `GuiCancel(&ctx)` silently clears all interaction state (window focus loss, context removal); `GuiReleaseCapture(&ctx)` drops only the capture. `GuiSetDragThreshold(px)` / `GuiGetDragThreshold()` configure the drag threshold at runtime.
+Contexts are independent and persist across frames: zero-initialize once and keep them alive. `GuiCancel(&ctx)` silently clears all interaction state (window focus loss, context removal); `GuiReleaseCapture(&ctx)` drops only the capture. `GuiSetDragThreshold(px)` / `GuiGetDragThreshold()` configure the drag threshold at runtime.
 
 Rules:
 
 - The press frame is capture-only: no control runs interaction side effects. The topmost hit control becomes the tentative owner.
 - Click-like results are returned on release. Dragging starts after the 5 px drag threshold; direction arbitration then transfers the capture to the first hit control supporting that direction (for example a Slider under a floating Button). If no control supports the direction, the topmost press owner keeps the capture, so a Button still triggers after a small drag.
 - The capture owner keeps the interaction while the pointer leaves its bounds, but the release position matters: a discrete control (Button, Toggle, CheckBox, ComboBox, ...) released outside its bounds is cancelled, while a continuous drag (Slider, ScrollBar, ColorPanel) may finish outside and keeps updating.
-- The default context uses only the first input of the frame; extra touches are ignored. With `GuiPushContext()`, each context takes the first input that is not occupied (preferring a pressed/held input over an idle one) and keeps it while held.
-- One input is assigned to one context at a time. Contexts are isolation units, not concurrency units: use one context per independent touch area.
-- Layered UI uses one frame for the whole stack: draw layers from bottom to top, never start/end a frame per layer. Later controls win the hit stack; modal editors block layers below. `GuiPushContext()` is for disjoint touch regions, not z-ordering. To block a background layer while a popup is open, call `GuiLock()` before drawing it and `GuiUnlock()` before drawing the popup.
-- `GuiBeginFrame()`/`GuiEndFrame()` are the macro-driven convenience pair used by standalone backends; `GuiBegin()`/`GuiEnd()` take explicit `GuiInput` snapshots. All three frame pairs are paired and cannot be mixed within a frame.
+- `GuiEnd()` writes `pointerCaptured` on the context: true on a press that hit a control, on confirmed drags and on release frames; false on idle frames. The host uses it to keep UI-owned pointers away from game/camera input.
+- One pointer per context. Multi-pointer setups are multiple contexts with separate Begin/End passes; the host routes each pointer and decides what to do with its `pointerCaptured`.
+- Layered UI uses one frame for the whole stack: draw layers from bottom to top, never start/end a frame per layer. Later controls win the hit stack; modal editors block layers below. To block a background layer while a popup is open, call `GuiLock()` before drawing it and `GuiUnlock()` before drawing the popup.
+- There is a single frame pair: `GuiBegin(ctx)`/`GuiEnd()`. Reading devices (mouse, touches, gamepad) and assigning them to contexts is entirely application-side.
 - Without capture only the topmost hit control is highlighted; with capture only the capture holder is. Hover ownership does not drift with the pointer.
 - Editing TextBox and expanded DropdownBox are modal: clicking outside only ends their interaction and never activates controls underneath.
 - Only one discrete control returns a result per context per frame.
@@ -148,7 +130,7 @@ Rules:
 - ValueBox and ValueBoxFloat are built on the internal GuiTextBox: both keep their text in an internal buffer while editing and parse only on commit (ENTER, ESCAPE or click outside). `GuiValueBoxFloat(bounds, text, float *value, float minValue, float maxValue)` no longer takes a caller text buffer. For both controls `maxValue <= minValue` disables the range limit; otherwise committed/external values are clamped. Invalid text keeps the previous value. This also gives them normal TextBox editing (cursor, selection, clipboard).
 - `GuiSpinner()` is a layout helper built from two Buttons and a ValueBox; the three children own their capture ids independently. While the value box is editing, an arrow click first commits the editor (modal), and the next click steps the value.
 
-Migrating from raygui 5.0: remove `GuiSetCapturedId()`, `GuiPushId()` and `GuiPopId()` calls, wrap the UI in `GuiBeginFromRaylib()`/`GuiEndFromRaylib()` (or `GuiBeginFrame()`/`GuiEndFrame()` for a custom backend, or `GuiBegin(inputs, count)`/`GuiEnd()` for explicit inputs), and remove the `editMode` argument from TextBox/ValueBox/ValueBoxFloat/Spinner/DropdownBox calls.
+Migrating from raygui 5.0: remove `GuiSetCapturedId()`, `GuiPushId()` and `GuiPopId()` calls, wrap the UI in `GuiBegin(&ctx)`/`GuiEnd()` with a host-filled `GuiContext`, and remove the `editMode` argument from TextBox/ValueBox/ValueBoxFloat/Spinner/DropdownBox calls. Migrating from the intermediate capture build: `GuiInput[]`, `occupied`/`touchId` routing, `GuiPushContext()`/`GuiPopContext()` and all `GuiBeginFromRaylib()`/`GuiBeginFrame()` helpers are gone; route pointers in your own code and read `ctx.pointerCaptured` after `GuiEnd()`.
 
 See [examples/scroll_panel](examples/scroll_panel) for overlapping controls and [examples/controls_test_suite](examples/controls_test_suite) for every control.
 For the implementation notes and behaviour matrix, see [docs/control-capture.md](docs/control-capture.md).

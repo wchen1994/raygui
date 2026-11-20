@@ -19,6 +19,9 @@
 
 #define RAYGUI_IMPLEMENTATION
 #include "../../src/raygui.h"
+#include "../raygui_host_input.h"
+
+static GuiContext guiContext = { 0 };
 
 //------------------------------------------------------------------------------------
 // Program main entry point
@@ -78,7 +81,7 @@ int main()
         //----------------------------------------------------------------------------------
         BeginDrawing();
 
-            GuiBeginFromRaylib();
+            GuiHostBeginMouse(&guiContext);
 
             ClearBackground(RAYWHITE);
 
@@ -87,7 +90,7 @@ int main()
             DrawText(TextFormat("Mouse Position: [ %.0f, %.0f ]", mousePosition.x, mousePosition.y), 10, 40, 10, DARKGRAY);
             DrawText(TextFormat("Window Position: [ %.0f, %.0f ]", windowPosition.x, windowPosition.y), 10, 60, 10, DARKGRAY);
 
-            GuiEndFromRaylib();
+            GuiEnd();
 
         EndDrawing();
         //----------------------------------------------------------------------------------

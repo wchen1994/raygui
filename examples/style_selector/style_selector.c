@@ -21,6 +21,9 @@
 //#define RAYGUI_CUSTOM_ICONS     // It requires providing gui_icons.h in the same directory
 //#include "gui_icons.h"          // External icons data provided, it can be generated with rGuiIcons tool
 #include "../../src/raygui.h"
+#include "../raygui_host_input.h"
+
+static GuiContext guiContext = { 0 };
 
 // raygui embedded styles
 // NOTE: Included in the same order as selector
@@ -115,7 +118,7 @@ int main()
         //----------------------------------------------------------------------------------
         BeginDrawing();
 
-            GuiBeginFromRaylib();
+            GuiHostBeginMouse(&guiContext);
 
             ClearBackground(GetColor(GuiGetStyle(DEFAULT, BACKGROUND_COLOR)));
 
@@ -134,7 +137,7 @@ int main()
             //GuiSetStyle(BUTTON, TEXT_ALIGNMENT, TEXT_ALIGN_CENTER);
             //----------------------------------------------------------------------------------
 
-            GuiEndFromRaylib();
+            GuiEnd();
 
         EndDrawing();
         //----------------------------------------------------------------------------------

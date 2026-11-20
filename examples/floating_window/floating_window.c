@@ -2,6 +2,9 @@
 
 #define RAYGUI_IMPLEMENTATION
 #include "../../src/raygui.h"
+#include "../raygui_host_input.h"
+
+static GuiContext guiContext = { 0 };
 
 #include "../../styles/dark/style_dark.h"
 
@@ -137,11 +140,11 @@ int main(void) {
     while(!WindowShouldClose()) {
         BeginDrawing();
 
-            GuiBeginFromRaylib();
+            GuiHostBeginMouse(&guiContext);
             ClearBackground(DARKGREEN);
             GuiWindowFloating(&window_position, &window_size, &minimized, &moving, &resizing, &DrawContent, (Vector2) { 140, 320 }, &scroll, "Movable & Scalable Window");
             GuiWindowFloating(&window2_position, &window2_size, &minimized2, &moving2, &resizing2, &DrawContent, (Vector2) { 140, 320 }, &scroll2, "Another window");
-            GuiEndFromRaylib();
+            GuiEnd();
 
         EndDrawing();
     }
